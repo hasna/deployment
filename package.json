@@ -1,0 +1,65 @@
+{
+  "name": "@hasna/deployment",
+  "version": "0.0.1",
+  "description": "General-purpose deployment orchestration for AI agents — provision infrastructure, deploy apps, manage environments. CLI + MCP + REST + SDK.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "deployment": "dist/cli/index.js",
+    "deployment-mcp": "dist/mcp/index.js",
+    "deployment-serve": "dist/server/index.js"
+  },
+  "scripts": {
+    "build": "bun build src/cli/index.ts --outdir dist/cli --target bun --external commander --external chalk --external @modelcontextprotocol/sdk --external hono --external @hasna/secrets && bun build src/mcp/index.ts --outdir dist/mcp --target bun --external @modelcontextprotocol/sdk && bun build src/server/index.ts --outdir dist/server --target bun --external hono && bun build src/index.ts --outdir dist --target bun && tsc --emitDeclarationOnly --outDir dist",
+    "dev:cli": "bun run src/cli/index.ts",
+    "dev:mcp": "bun run src/mcp/index.ts",
+    "dev:serve": "bun run src/server/index.ts",
+    "test": "bun test",
+    "test:coverage": "bun test --coverage",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "bun run build"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "keywords": [
+    "deployment",
+    "ai-agents",
+    "infrastructure",
+    "devops",
+    "vercel",
+    "cloudflare",
+    "railway",
+    "flyio",
+    "aws",
+    "digitalocean",
+    "mcp",
+    "cli"
+  ],
+  "author": "Andrei Hasna <andrei@hasna.com>",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "chalk": "^5.4.1",
+    "commander": "^13.1.0",
+    "hono": "^4.7.4",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.4",
+    "typescript": "^5.7.3"
+  }
+}
