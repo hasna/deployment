@@ -9,10 +9,14 @@ import { listDeployments } from "../db/deployments.js";
 import { listResources, deleteResource } from "../db/resources.js";
 import { listBlueprints, getBlueprint } from "../db/blueprints.js";
 import { registerAgent, listAgents } from "../db/agents.js";
-import { deploy, rollback, promote, getStatus, getLogs } from "../lib/deployer.js";
+import { deploy, rollback, promote, getStatus, getLogs, previewDeploy } from "../lib/deployer.js";
 import { applyBlueprint, seedBuiltinBlueprints } from "../lib/blueprints.js";
 import { setDeploymentSecret, listDeploymentSecrets, initSecrets } from "../lib/secrets-integration.js";
-import { registerProvider } from "../lib/provider.js";
+import { registerProvider, getProvider as getRegisteredProvider } from "../lib/provider.js";
+import { detectProjectType } from "../lib/detect.js";
+import { addHook, listHooks, removeHook, runHooks, ensureHooksTable } from "../lib/hooks.js";
+import { getLatestDeployment } from "../db/deployments.js";
+import { timeAgo } from "../lib/format.js";
 import { VercelProvider } from "../lib/vercel.js";
 import { CloudflareProvider } from "../lib/cloudflare.js";
 import { RailwayProvider } from "../lib/railway.js";
@@ -71,6 +75,14 @@ const TOOL_CATALOG = [
   { name: "list_secrets", description: "List deployment secrets" },
   { name: "register_agent", description: "Register a deployer agent" },
   { name: "list_agents", description: "List registered agents" },
+  { name: "detect_project_type", description: "Detect project type from filesystem path" },
+  { name: "doctor", description: "System health check — DB, secrets, providers" },
+  { name: "overview", description: "All projects/environments/deployments summary" },
+  { name: "deploy_dry_run", description: "Preview deploy without executing" },
+  { name: "add_hook", description: "Add a deployment hook" },
+  { name: "list_hooks", description: "List deployment hooks" },
+  { name: "remove_hook", description: "Remove a deployment hook" },
+  { name: "test_hook", description: "Test hooks for a given event" },
   { name: "describe_tools", description: "List all available tools" },
   { name: "search_tools", description: "Search tools by keyword" },
 ];
@@ -334,6 +346,136 @@ server.tool("register_agent", "Register a deployer agent", {
 
 server.tool("list_agents", "List registered agents", {}, async () => {
   try { return ok(listAgents()); } catch (e) { return err(e); }
+});
+
+// ── Detection Tools ──────────────────────────────────────────────────────
+
+server.tool("detect_project_type", "Detect project type from filesystem path", {
+  path: z.string().describe("Filesystem path to scan"),
+}, async (params) => {
+  try { return ok(detectProjectType(params.path)); } catch (e) { return err(e); }
+});
+
+// ── Doctor Tool ──────────────────────────────────────────────────────────
+
+server.tool("doctor", "System health check", {}, async () => {
+  const checks: Record<string, string> = {};
+  try { listProjects(); checks["database"] = "ok"; } catch { checks["database"] = "error"; }
+  try {
+    const available = await initSecrets();
+    checks["secrets"] = available ? "ok" : "not_installed";
+  } catch { checks["secrets"] = "not_installed"; }
+
+  const provs = listProviders();
+  for (const p of provs) {
+    try {
+      const prov = getRegisteredProvider(p.type);
+      await prov.connect({});
+      checks[`provider_${p.name}`] = "ok";
+    } catch {
+      checks[`provider_${p.name}`] = "error";
+    }
+  }
+  return ok(checks);
+});
+
+// ── Overview Tool ────────────────────────────────────────────────────────
+
+server.tool("overview", "All projects/environments/deployments summary", {}, async () => {
+  try {
+    const projects = listProjects();
+    const result: Array<{
+      project: string;
+      environment: string;
+      provider: string;
+      status: string;
+      url: string;
+      last_deploy: string;
+    }> = [];
+
+    for (const p of projects) {
+      const envs = listEnvironments({ project_id: p.id });
+      for (const env of envs) {
+        let providerType = "";
+        try { providerType = getDbProvider(env.provider_id).type; } catch { providerType = "unknown"; }
+        const latest = getLatestDeployment(env.id);
+        result.push({
+          project: p.name,
+          environment: env.name,
+          provider: providerType,
+          status: latest?.status ?? "none",
+          url: latest?.url ?? "",
+          last_deploy: latest ? timeAgo(latest.created_at) : "never",
+        });
+      }
+    }
+
+    return ok(result);
+  } catch (e) { return err(e); }
+});
+
+// ── Dry-Run Deploy Tool ──────────────────────────────────────────────────
+
+server.tool("deploy_dry_run", "Preview deploy without executing", {
+  project_id: z.string().describe("Project ID"),
+  environment_id: z.string().describe("Environment ID"),
+  image: z.string().optional(),
+  commit_sha: z.string().optional(),
+  version: z.string().optional(),
+}, async (params) => {
+  try {
+    return ok(previewDeploy({
+      projectId: params.project_id,
+      environmentId: params.environment_id,
+      image: params.image,
+      commitSha: params.commit_sha,
+      version: params.version,
+    }));
+  } catch (e) { return err(e); }
+});
+
+// ── Hook Tools ───────────────────────────────────────────────────────────
+
+server.tool("add_hook", "Add a deployment hook", {
+  event: z.enum(["pre-deploy", "post-deploy", "deploy-failed", "pre-rollback", "post-rollback", "pre-promote", "post-promote"]).describe("Hook event"),
+  command: z.string().describe("Command to run"),
+  project_id: z.string().optional().describe("Scope to project"),
+  environment_id: z.string().optional().describe("Scope to environment"),
+}, async (params) => {
+  try { return ok(addHook(params.event, params.command, params.project_id, params.environment_id)); } catch (e) { return err(e); }
+});
+
+server.tool("list_hooks", "List deployment hooks", {
+  event: z.enum(["pre-deploy", "post-deploy", "deploy-failed", "pre-rollback", "post-rollback", "pre-promote", "post-promote"]).optional(),
+  project_id: z.string().optional(),
+}, async (params) => {
+  try {
+    ensureHooksTable();
+    return ok(listHooks(params.event, params.project_id));
+  } catch (e) { return err(e); }
+});
+
+server.tool("remove_hook", "Remove a deployment hook", {
+  id: z.string().describe("Hook ID"),
+}, async (params) => {
+  try { removeHook(params.id); return ok({ deleted: true }); } catch (e) { return err(e); }
+});
+
+server.tool("test_hook", "Test hooks for a given event", {
+  event: z.enum(["pre-deploy", "post-deploy", "deploy-failed", "pre-rollback", "post-rollback", "pre-promote", "post-promote"]).describe("Hook event to test"),
+}, async (params) => {
+  try {
+    ensureHooksTable();
+    const results = await runHooks(params.event, {
+      project_id: "test",
+      project_name: "test-project",
+      environment_id: "test",
+      environment_name: "test-env",
+      environment_type: "dev",
+      provider_type: "railway",
+    });
+    return ok(results);
+  } catch (e) { return err(e); }
 });
 
 // ── Start Server ────────────────────────────────────────────────────────────

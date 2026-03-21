@@ -5,6 +5,8 @@ import { getEnvironment } from "../db/environments.js";
 import { getProject } from "../db/projects.js";
 import { getProvider as getDbProvider } from "../db/providers.js";
 import { now } from "../db/database.js";
+import { runHooks } from "./hooks.js";
+import type { HookContext } from "./hooks.js";
 import type {
   Deployment,
   DeployOptions,
@@ -28,6 +30,49 @@ export interface PromoteInput {
   toEnvironmentId: string;
 }
 
+function buildHookContext(
+  project: { id: string; name: string },
+  environment: { id: string; name: string; type: string },
+  providerType: string,
+  extra?: Partial<HookContext>
+): HookContext {
+  return {
+    project_id: project.id,
+    project_name: project.name,
+    environment_id: environment.id,
+    environment_name: environment.name,
+    environment_type: environment.type,
+    provider_type: providerType,
+    ...extra,
+  };
+}
+
+export interface DeployPreview {
+  project: string;
+  environment: string;
+  provider: string;
+  image?: string;
+  commitSha?: string;
+  version?: string;
+  config: Record<string, unknown>;
+}
+
+export function previewDeploy(input: DeployInput): DeployPreview {
+  const project = getProject(input.projectId);
+  const environment = getEnvironment(input.environmentId);
+  const dbProvider = getDbProvider(environment.provider_id);
+
+  return {
+    project: project.name,
+    environment: environment.name,
+    provider: dbProvider.type,
+    image: input.image,
+    commitSha: input.commitSha,
+    version: input.version,
+    config: { ...environment.config, ...input.config },
+  };
+}
+
 export async function deploy(input: DeployInput): Promise<Deployment> {
   const project = getProject(input.projectId);
   const environment = getEnvironment(input.environmentId);
@@ -43,7 +88,17 @@ export async function deploy(input: DeployInput): Promise<Deployment> {
     commit_sha: input.commitSha,
   });
 
+  const hookCtx = buildHookContext(project, environment, dbProvider.type, {
+    deployment_id: deployment.id,
+    version: input.version,
+    image: input.image,
+    commit_sha: input.commitSha,
+  });
+
   try {
+    // Run pre-deploy hooks
+    await runHooks("pre-deploy", hookCtx);
+
     // Connect to provider
     const secrets = getDeploymentSecrets(project.name, environment.name);
     await provider.connect(secrets.credentials);
@@ -96,6 +151,9 @@ export async function deploy(input: DeployInput): Promise<Deployment> {
       completed_at: now(),
     });
 
+    // Run post-deploy hooks
+    await runHooks("post-deploy", { ...hookCtx, url: result.url, status: "live" });
+
     return { ...deployment, status: "live", url: result.url, completed_at: now() };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -104,6 +162,10 @@ export async function deploy(input: DeployInput): Promise<Deployment> {
       logs: message,
       completed_at: now(),
     });
+
+    // Run deploy-failed hooks
+    await runHooks("deploy-failed", { ...hookCtx, status: "failed", error: message }).catch(() => {});
+
     throw new DeploymentFailedError(deployment.id, message);
   }
 }
@@ -120,6 +182,17 @@ export async function rollback(
 
   const latest = getLatestDeployment(environmentId);
   if (!latest) throw new Error("No deployments found for this environment");
+
+  const hookCtx = buildHookContext(project, environment, dbProvider.type, {
+    deployment_id: latest.id,
+    version: latest.version,
+    image: latest.image,
+    commit_sha: latest.commit_sha,
+    url: latest.url,
+  });
+
+  // Run pre-rollback hooks
+  await runHooks("pre-rollback", hookCtx);
 
   const secrets = getDeploymentSecrets(project.name, environment.name);
   await provider.connect(secrets.credentials);
@@ -147,6 +220,9 @@ export async function rollback(
       completed_at: now(),
     });
 
+    // Run post-rollback hooks
+    await runHooks("post-rollback", { ...hookCtx, deployment_id: deployment.id, url: result.url, status: "live" });
+
     return { ...deployment, status: "live", url: result.url };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -165,13 +241,33 @@ export async function promote(input: PromoteInput): Promise<Deployment> {
     throw new Error("No live deployment in source environment to promote");
   }
 
-  return deploy({
+  const project = getProject(input.projectId);
+  const fromEnv = getEnvironment(input.fromEnvironmentId);
+  const toEnv = getEnvironment(input.toEnvironmentId);
+  const dbProv = getDbProvider(toEnv.provider_id);
+
+  const hookCtx = buildHookContext(project, toEnv, dbProv.type, {
+    deployment_id: latestSource.id,
+    version: latestSource.version,
+    image: latestSource.image,
+    commit_sha: latestSource.commit_sha,
+  });
+
+  // Run pre-promote hooks
+  await runHooks("pre-promote", { ...hookCtx, environment_name: `${fromEnv.name} → ${toEnv.name}` });
+
+  const result = await deploy({
     projectId: input.projectId,
     environmentId: input.toEnvironmentId,
     image: latestSource.image,
     commitSha: latestSource.commit_sha,
     version: `promoted-${latestSource.version}`,
   });
+
+  // Run post-promote hooks
+  await runHooks("post-promote", { ...hookCtx, deployment_id: result.id, url: result.url, status: result.status, environment_name: `${fromEnv.name} → ${toEnv.name}` });
+
+  return result;
 }
 
 export async function getStatus(

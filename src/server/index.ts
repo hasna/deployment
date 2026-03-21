@@ -8,9 +8,15 @@ import { listDeployments, getDeployment } from "../db/deployments.js";
 import { listResources, deleteResource } from "../db/resources.js";
 import { listBlueprints, getBlueprint } from "../db/blueprints.js";
 import { registerAgent, listAgents } from "../db/agents.js";
-import { deploy, rollback, promote, getLogs } from "../lib/deployer.js";
+import { deploy, rollback, promote, getLogs, previewDeploy } from "../lib/deployer.js";
 import { applyBlueprint, seedBuiltinBlueprints } from "../lib/blueprints.js";
-import { registerProvider } from "../lib/provider.js";
+import { registerProvider, getProvider as getRegisteredProvider } from "../lib/provider.js";
+import { detectProjectType } from "../lib/detect.js";
+import { addHook, listHooks, removeHook, runHooks, ensureHooksTable } from "../lib/hooks.js";
+import { initSecrets } from "../lib/secrets-integration.js";
+import { getLatestDeployment } from "../db/deployments.js";
+import { timeAgo } from "../lib/format.js";
+import type { DeploymentHookEvent } from "../lib/hooks.js";
 import { VercelProvider } from "../lib/vercel.js";
 import { CloudflareProvider } from "../lib/cloudflare.js";
 import { RailwayProvider } from "../lib/railway.js";
@@ -266,6 +272,135 @@ app.post("/api/agents", async (c) => {
   try {
     const body = await c.req.json() as { name: string; type?: "human" | "agent" };
     return c.json(registerAgent(body), 201);
+  } catch (e) {
+    return c.json({ error: (e as Error).message }, 422);
+  }
+});
+
+// ── Doctor ──────────────────────────────────────────────────────────────
+
+app.get("/api/doctor", async (c) => {
+  const checks: Record<string, string> = {};
+  try { listProjects(); checks["database"] = "ok"; } catch { checks["database"] = "error"; }
+  try {
+    const available = await initSecrets();
+    checks["secrets"] = available ? "ok" : "not_installed";
+  } catch { checks["secrets"] = "not_installed"; }
+
+  const provs = listProviders();
+  for (const p of provs) {
+    try {
+      const prov = getRegisteredProvider(p.type);
+      await prov.connect({});
+      checks[`provider_${p.name}`] = "ok";
+    } catch {
+      checks[`provider_${p.name}`] = "error";
+    }
+  }
+  return c.json(checks);
+});
+
+// ── Overview ────────────────────────────────────────────────────────────
+
+app.get("/api/overview", (c) => {
+  try {
+    const projects = listProjects();
+    const result: Array<{
+      project: string;
+      environment: string;
+      provider: string;
+      status: string;
+      url: string;
+      last_deploy: string;
+    }> = [];
+
+    for (const p of projects) {
+      const envs = listEnvironments({ project_id: p.id });
+      for (const env of envs) {
+        let providerType = "";
+        try { providerType = getDbProvider(env.provider_id).type; } catch { providerType = "unknown"; }
+        const latest = getLatestDeployment(env.id);
+        result.push({
+          project: p.name,
+          environment: env.name,
+          provider: providerType,
+          status: latest?.status ?? "none",
+          url: latest?.url ?? "",
+          last_deploy: latest ? timeAgo(latest.created_at) : "never",
+        });
+      }
+    }
+
+    return c.json(result);
+  } catch (e) {
+    return c.json({ error: (e as Error).message }, 500);
+  }
+});
+
+// ── Dry-Run Deploy ──────────────────────────────────────────────────────
+
+app.post("/api/deploy/dry-run", async (c) => {
+  try {
+    const body = await c.req.json() as {
+      project_id: string; environment_id: string; image?: string; commit_sha?: string; version?: string;
+    };
+    return c.json(previewDeploy({
+      projectId: body.project_id,
+      environmentId: body.environment_id,
+      image: body.image,
+      commitSha: body.commit_sha,
+      version: body.version,
+    }));
+  } catch (e) {
+    return c.json({ error: (e as Error).message }, 422);
+  }
+});
+
+// ── Detect ──────────────────────────────────────────────────────────────
+
+app.get("/api/detect", (c) => {
+  const path = c.req.query("path");
+  if (!path) return c.json({ error: "path query parameter required" }, 400);
+  try { return c.json(detectProjectType(path)); }
+  catch (e) { return c.json({ error: (e as Error).message }, 422); }
+});
+
+// ── Hooks ───────────────────────────────────────────────────────────────
+
+app.get("/api/hooks", (c) => {
+  ensureHooksTable();
+  const event = c.req.query("event") as DeploymentHookEvent | undefined;
+  const project_id = c.req.query("project_id") ?? undefined;
+  return c.json(listHooks(event, project_id));
+});
+
+app.post("/api/hooks", async (c) => {
+  try {
+    const body = await c.req.json() as { event: string; command: string; project_id?: string; environment_id?: string };
+    return c.json(addHook(body.event as DeploymentHookEvent, body.command, body.project_id, body.environment_id), 201);
+  } catch (e) {
+    return c.json({ error: (e as Error).message }, 422);
+  }
+});
+
+app.delete("/api/hooks/:id", (c) => {
+  try { removeHook(c.req.param("id")); return c.json({ deleted: true }); }
+  catch { return c.json({ error: "Hook not found" }, 404); }
+});
+
+app.post("/api/hooks/test/:event", async (c) => {
+  try {
+    ensureHooksTable();
+    const event = c.req.param("event") as DeploymentHookEvent;
+    const results = await runHooks(event, {
+      project_id: "test",
+      project_name: "test-project",
+      environment_id: "test",
+      environment_name: "test-env",
+      environment_type: "dev",
+      provider_type: "railway",
+    });
+    return c.json(results);
   } catch (e) {
     return c.json({ error: (e as Error).message }, 422);
   }
