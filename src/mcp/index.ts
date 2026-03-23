@@ -8,7 +8,7 @@ import { createProvider as createDbProvider, getProvider as getDbProvider, listP
 import { listDeployments } from "../db/deployments.js";
 import { listResources, deleteResource } from "../db/resources.js";
 import { listBlueprints, getBlueprint } from "../db/blueprints.js";
-import { registerAgent, listAgents } from "../db/agents.js";
+import { registerAgent, listAgents, heartbeat as dbHeartbeat, setFocus as dbSetFocus } from "../db/agents.js";
 import { deploy, rollback, promote, getStatus, getLogs, previewDeploy } from "../lib/deployer.js";
 import { applyBlueprint, seedBuiltinBlueprints } from "../lib/blueprints.js";
 import { setDeploymentSecret, listDeploymentSecrets, initSecrets } from "../lib/secrets-integration.js";
@@ -74,7 +74,9 @@ const TOOL_CATALOG = [
   { name: "set_secret", description: "Set a deployment secret" },
   { name: "list_secrets", description: "List deployment secrets" },
   { name: "register_agent", description: "Register a deployer agent" },
-  { name: "list_agents", description: "List registered agents" },
+  { name: "list_agents", description: "List all registered agents" },
+  { name: "heartbeat", description: "Update last_seen_at to signal agent is active" },
+  { name: "set_focus", description: "Set active project context for this agent session" },
   { name: "detect_project_type", description: "Detect project type from filesystem path" },
   { name: "doctor", description: "System health check — DB, secrets, providers" },
   { name: "overview", description: "All projects/environments/deployments summary" },
@@ -344,8 +346,21 @@ server.tool("register_agent", "Register a deployer agent", {
   try { return ok(registerAgent({ name: params.name, type: params.type })); } catch (e) { return err(e); }
 });
 
-server.tool("list_agents", "List registered agents", {}, async () => {
+server.tool("list_agents", "List all registered agents", {}, async () => {
   try { return ok(listAgents()); } catch (e) { return err(e); }
+});
+
+server.tool("heartbeat", "Update last_seen_at to signal agent is active", {
+  agent_id: z.string(),
+}, async (params) => {
+  try { return ok(dbHeartbeat(params.agent_id)); } catch (e) { return err(e); }
+});
+
+server.tool("set_focus", "Set active project context for this agent session", {
+  agent_id: z.string(),
+  project_id: z.string().optional(),
+}, async (params) => {
+  try { return ok(dbSetFocus(params.agent_id, params.project_id ?? null)); } catch (e) { return err(e); }
 });
 
 // ── Detection Tools ──────────────────────────────────────────────────────

@@ -128,6 +128,7 @@ export interface Agent {
   id: string;
   name: string;
   type: "human" | "agent";
+  project_id: string | null;
   registered_at: string;
   last_seen: string;
 }
@@ -207,6 +208,7 @@ export interface AgentRow {
   id: string;
   name: string;
   type: string;
+  project_id: string | null;
   registered_at: string;
   last_seen: string;
 }

@@ -11,6 +11,7 @@ function rowToAgent(row: AgentRow): Agent {
     id: row.id,
     name: row.name,
     type: row.type as Agent["type"],
+    project_id: row.project_id ?? null,
     registered_at: row.registered_at,
     last_seen: row.last_seen,
   };
@@ -92,4 +93,18 @@ export function touchAgent(id: string): void {
   const db = getDatabase();
   const agent = getAgent(id);
   db.query("UPDATE agents SET last_seen = ? WHERE id = ?").run(now(), agent.id);
+}
+
+export function heartbeat(id: string): Agent {
+  const db = getDatabase();
+  const agent = getAgent(id);
+  db.query("UPDATE agents SET last_seen = ? WHERE id = ?").run(now(), agent.id);
+  return getAgent(agent.id);
+}
+
+export function setFocus(id: string, projectId: string | null): Agent {
+  const db = getDatabase();
+  const agent = getAgent(id);
+  db.query("UPDATE agents SET project_id = ?, last_seen = ? WHERE id = ?").run(projectId, now(), agent.id);
+  return getAgent(agent.id);
 }

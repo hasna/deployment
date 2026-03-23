@@ -88,6 +88,8 @@ const MIGRATIONS = [
   `CREATE INDEX IF NOT EXISTS idx_resources_type ON resources(type)`,
   `CREATE INDEX IF NOT EXISTS idx_providers_type ON providers(type)`,
   `CREATE INDEX IF NOT EXISTS idx_blueprints_provider ON blueprints(provider_type)`,
+  // v2: Add project_id to agents for set_focus support
+  `ALTER TABLE agents ADD COLUMN project_id TEXT`,
 ];
 
 export function getDataDir(): string {

@@ -9,7 +9,7 @@ export { createProvider, getProvider as getDbProvider, listProviders, updateProv
 export { createDeployment, getDeployment, listDeployments, updateDeployment, getLatestDeployment, getDeploymentsByStatus, deleteDeployment } from "./db/deployments.js";
 export { createResource, getResource, listResources, updateResource, deleteResource } from "./db/resources.js";
 export { createBlueprint, getBlueprint, listBlueprints, updateBlueprint, deleteBlueprint } from "./db/blueprints.js";
-export { registerAgent, getAgent, listAgents, updateAgent, deleteAgent, touchAgent } from "./db/agents.js";
+export { registerAgent, getAgent, listAgents, updateAgent, deleteAgent, touchAgent, heartbeat, setFocus } from "./db/agents.js";
 
 // Lib
 export { registerProvider, getProvider, listRegisteredProviders, hasProvider, clearProviders } from "./lib/provider.js";
