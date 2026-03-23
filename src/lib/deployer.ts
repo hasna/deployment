@@ -1,5 +1,5 @@
 import { getProvider } from "./provider.js";
-import { getDeploymentSecrets, injectSecretsToProvider } from "./secrets-integration.js";
+import { getDeploymentSecrets, injectSecretsToProvider, checkSecretParity } from "./secrets-integration.js";
 import { createDeployment, updateDeployment, getLatestDeployment } from "../db/deployments.js";
 import { getEnvironment } from "../db/environments.js";
 import { getProject } from "../db/projects.js";
@@ -96,6 +96,18 @@ export async function deploy(input: DeployInput): Promise<Deployment> {
   });
 
   try {
+    // Pre-deploy secret parity check
+    const parity = checkSecretParity(project.name, environment.name);
+    if (!parity.passed) {
+      const issues = [
+        ...parity.missing.map((k) => `missing: ${k}`),
+        ...parity.empty.map((k) => `empty: ${k}`),
+      ];
+      throw new Error(
+        `Secret parity check failed for ${environment.name}: ${issues.join(", ")}`
+      );
+    }
+
     // Run pre-deploy hooks
     await runHooks("pre-deploy", hookCtx);
 

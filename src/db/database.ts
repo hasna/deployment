@@ -81,6 +81,21 @@ const MIGRATIONS = [
     registered_at TEXT NOT NULL,
     last_seen TEXT NOT NULL
   )`,
+  // v2: Secrets registry
+  `CREATE TABLE IF NOT EXISTS secrets (
+    id TEXT PRIMARY KEY,
+    project_name TEXT NOT NULL,
+    environment TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT 'local',
+    aws_arn TEXT NOT NULL DEFAULT '',
+    last_rotated TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(project_name, environment, key)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_secrets_project_env ON secrets(project_name, environment)`,
   // Indexes
   `CREATE INDEX IF NOT EXISTS idx_environments_project ON environments(project_id)`,
   `CREATE INDEX IF NOT EXISTS idx_deployments_project ON deployments(project_id)`,

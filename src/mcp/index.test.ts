@@ -63,13 +63,21 @@ describe("mcp/index", () => {
       "apply_blueprint",
       "set_secret",
       "list_secrets",
+      "diff_secrets",
+      "sync_secrets",
+      "set_config",
+      "list_config",
+      "check_secret_parity",
+      "rotate_secret",
+      "logs_tail",
+      "ecs_status",
       "register_agent",
       "list_agents",
       "describe_tools",
       "search_tools",
     ];
-    // The TOOL_CATALOG in the source has 29 entries
-    expect(expectedTools.length).toBe(29);
+    // The TOOL_CATALOG in the source has 37 entries
+    expect(expectedTools.length).toBe(37);
     // Each name is unique
     const unique = new Set(expectedTools);
     expect(unique.size).toBe(expectedTools.length);

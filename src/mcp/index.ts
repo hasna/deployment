@@ -11,7 +11,7 @@ import { listBlueprints, getBlueprint } from "../db/blueprints.js";
 import { registerAgent, listAgents, heartbeat as dbHeartbeat, setFocus as dbSetFocus } from "../db/agents.js";
 import { deploy, rollback, promote, getStatus, getLogs, previewDeploy } from "../lib/deployer.js";
 import { applyBlueprint, seedBuiltinBlueprints } from "../lib/blueprints.js";
-import { setDeploymentSecret, listDeploymentSecrets, initSecrets } from "../lib/secrets-integration.js";
+import { setDeploymentSecret, listDeploymentSecrets, diffSecrets, checkSecretParity, syncSecrets, setConfigParam, listConfigParams, rotateSecret, initSecrets } from "../lib/secrets-integration.js";
 import { registerProvider, getProvider as getRegisteredProvider } from "../lib/provider.js";
 import { detectProjectType } from "../lib/detect.js";
 import { addHook, listHooks, removeHook, runHooks, ensureHooksTable } from "../lib/hooks.js";
@@ -73,6 +73,14 @@ const TOOL_CATALOG = [
   { name: "apply_blueprint", description: "Apply blueprint to provision infrastructure" },
   { name: "set_secret", description: "Set a deployment secret" },
   { name: "list_secrets", description: "List deployment secrets" },
+  { name: "diff_secrets", description: "Compare secrets across two environments" },
+  { name: "check_secret_parity", description: "Verify all required secrets exist for an environment" },
+  { name: "sync_secrets", description: "Copy secrets from one environment to another" },
+  { name: "set_config", description: "Set a non-sensitive config parameter (SSM)" },
+  { name: "list_config", description: "List config parameters (SSM) for an environment" },
+  { name: "rotate_secret", description: "Rotate an internal secret with new random value" },
+  { name: "logs_tail", description: "Tail CloudWatch logs for an ECS service" },
+  { name: "ecs_status", description: "Get ECS service health — running tasks, CPU, deployments" },
   { name: "register_agent", description: "Register a deployer agent" },
   { name: "list_agents", description: "List all registered agents" },
   { name: "heartbeat", description: "Update last_seen_at to signal agent is active" },
@@ -337,6 +345,125 @@ server.tool("list_secrets", "List deployment secrets", {
   } catch (e) { return err(e); }
 });
 
+server.tool("diff_secrets", "Compare secrets across two environments", {
+  project: z.string(),
+  env1: z.string().describe("First environment name"),
+  env2: z.string().describe("Second environment name"),
+}, async (params) => {
+  try {
+    return ok(diffSecrets(params.project, params.env1, params.env2));
+  } catch (e) { return err(e); }
+});
+
+server.tool("sync_secrets", "Copy secrets from one environment to another", {
+  project: z.string(),
+  from_env: z.string(),
+  to_env: z.string(),
+  include: z.array(z.string()).optional().describe("Only sync these keys"),
+  exclude: z.array(z.string()).optional().describe("Skip these keys"),
+  dry_run: z.boolean().optional().describe("Preview without making changes"),
+}, async (params) => {
+  try {
+    return ok(syncSecrets(params.project, params.from_env, params.to_env, {
+      include: params.include,
+      exclude: params.exclude,
+      dryRun: params.dry_run,
+    }));
+  } catch (e) { return err(e); }
+});
+
+server.tool("set_config", "Set a non-sensitive config parameter (SSM)", {
+  project: z.string(),
+  environment: z.string(),
+  key: z.string(),
+  value: z.string(),
+}, async (params) => {
+  try {
+    const record = setConfigParam(params.project, params.environment, params.key, params.value);
+    return ok({ set: true, key: record.key, environment: record.environment });
+  } catch (e) { return err(e); }
+});
+
+server.tool("list_config", "List config parameters (SSM) for an environment", {
+  project: z.string(),
+  environment: z.string().optional(),
+}, async (params) => {
+  try {
+    return ok(listConfigParams(params.project, params.environment));
+  } catch (e) { return err(e); }
+});
+
+server.tool("check_secret_parity", "Verify all required secrets exist for an environment", {
+  project: z.string(),
+  environment: z.string(),
+  required_keys: z.array(z.string()).optional().describe("Specific keys to check. If omitted, checks all registered secrets are non-empty."),
+}, async (params) => {
+  try {
+    return ok(checkSecretParity(params.project, params.environment, params.required_keys));
+  } catch (e) { return err(e); }
+});
+
+server.tool("rotate_secret", "Rotate an internal secret with new random value", {
+  project: z.string(),
+  environment: z.string(),
+  key: z.string(),
+  length: z.number().optional().describe("Length of new random value (default: 64)"),
+}, async (params) => {
+  try {
+    return ok(rotateSecret(params.project, params.environment, params.key, params.length));
+  } catch (e) { return err(e); }
+});
+
+server.tool("logs_tail", "Tail CloudWatch logs for an ECS service", {
+  log_group: z.string().describe("CloudWatch log group name (e.g. /ecs/alumia-dev-web)"),
+  filter: z.string().optional().describe("CloudWatch filter pattern"),
+  limit: z.number().optional().describe("Max events to return (default: 50)"),
+  minutes_ago: z.number().optional().describe("Only show logs from last N minutes"),
+}, async (params) => {
+  try {
+    const { AwsProvider } = await import("../lib/aws.js");
+    const { resolveCredentials } = await import("../lib/aws-auth.js");
+    const provider = new AwsProvider();
+    const creds = await resolveCredentials();
+    await provider.connect({
+      access_key_id: creds.accessKeyId,
+      secret_access_key: creds.secretAccessKey,
+      session_token: creds.sessionToken,
+      region: creds.region,
+    });
+    const startTime = params.minutes_ago
+      ? Date.now() - params.minutes_ago * 60 * 1000
+      : undefined;
+    const logs = await provider.tailLogs(params.log_group, {
+      filterPattern: params.filter,
+      limit: params.limit,
+      startTime,
+    });
+    return ok(logs);
+  } catch (e) { return err(e); }
+});
+
+server.tool("ecs_status", "Get ECS service health — running tasks, CPU, deployments", {
+  cluster: z.string().describe("ECS cluster name or ARN"),
+  services: z.array(z.string()).describe("Service names to check"),
+  region: z.string().optional().describe("AWS region (default: from credentials)"),
+}, async (params) => {
+  try {
+    const { AwsProvider } = await import("../lib/aws.js");
+    const { resolveCredentials } = await import("../lib/aws-auth.js");
+    const provider = new AwsProvider();
+    const creds = await resolveCredentials(params.region ? { region: params.region } : undefined);
+    await provider.connect({
+      access_key_id: creds.accessKeyId,
+      secret_access_key: creds.secretAccessKey,
+      session_token: creds.sessionToken,
+      region: creds.region,
+    });
+    const status = await provider.describeEcsServices(params.cluster, params.services);
+    return ok(status);
+  } catch (e) { return err(e); }
+});
+
 // ── Agent Tools ─────────────────────────────────────────────────────────────
 
 server.tool("register_agent", "Register a deployer agent", {
@@ -406,6 +533,9 @@ server.tool("overview", "All projects/environments/deployments summary", {}, asy
       status: string;
       url: string;
       last_deploy: string;
+      secrets_count: number;
+      config_count: number;
+      secret_parity: { passed: boolean; missing: number; empty: number } | null;
     }> = [];
 
     for (const p of projects) {
@@ -414,6 +544,12 @@ server.tool("overview", "All projects/environments/deployments summary", {}, asy
         let providerType = "";
         try { providerType = getDbProvider(env.provider_id).type; } catch { providerType = "unknown"; }
         const latest = getLatestDeployment(env.id);
+
+        // Secret and config counts
+        const secrets = listDeploymentSecrets(p.name, env.name);
+        const configs = listConfigParams(p.name, env.name);
+        const parity = checkSecretParity(p.name, env.name);
+
         result.push({
           project: p.name,
           environment: env.name,
@@ -421,6 +557,13 @@ server.tool("overview", "All projects/environments/deployments summary", {}, asy
           status: latest?.status ?? "none",
           url: latest?.url ?? "",
           last_deploy: latest ? timeAgo(latest.created_at) : "never",
+          secrets_count: secrets.length,
+          config_count: configs.length,
+          secret_parity: {
+            passed: parity.passed,
+            missing: parity.missing.length,
+            empty: parity.empty.length,
+          },
         });
       }
     }

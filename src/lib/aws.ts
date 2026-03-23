@@ -6,24 +6,51 @@ import type {
   ResourceType,
   ProvisionResult,
 } from "../types/index.js";
+import {
+  resolveCredentials,
+  signRequest,
+  type AwsCredentials,
+} from "./aws-auth.js";
 
 export class AwsProvider implements DeploymentProviderInterface {
   type = "aws" as const;
-  private region = "us-east-1";
-  private accessKeyId = "";
-  private secretAccessKey = "";
+  private credentials: AwsCredentials | null = null;
 
+  /**
+   * Connect using the credential chain.
+   * Accepts explicit creds or falls through to env → OIDC → shared file → IMDS.
+   */
   async connect(credentials: Record<string, string>): Promise<void> {
-    this.accessKeyId = credentials["access_key_id"] ?? "";
-    this.secretAccessKey = credentials["secret_access_key"] ?? "";
-    this.region = credentials["region"] ?? "us-east-1";
+    this.credentials = await resolveCredentials(credentials);
 
-    if (!this.accessKeyId || !this.secretAccessKey) {
-      throw new Error("AWS: access_key_id and secret_access_key are required");
-    }
-
+    // Validate by calling STS GetCallerIdentity
     const res = await this.awsApi("sts", "GetCallerIdentity", {});
-    if (!res.ok) throw new Error(`AWS: authentication failed (${res.status})`);
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`AWS: authentication failed (${res.status}): ${text}`);
+    }
+  }
+
+  /**
+   * Get the current caller identity (account, ARN, user ID).
+   */
+  async getCallerIdentity(): Promise<{ account: string; arn: string; userId: string }> {
+    const res = await this.awsApi("sts", "GetCallerIdentity", {});
+    const data = (await res.json()) as {
+      GetCallerIdentityResponse?: {
+        GetCallerIdentityResult?: {
+          Account: string;
+          Arn: string;
+          UserId: string;
+        };
+      };
+    };
+    const result = data.GetCallerIdentityResponse?.GetCallerIdentityResult;
+    return {
+      account: result?.Account ?? "",
+      arn: result?.Arn ?? "",
+      userId: result?.UserId ?? "",
+    };
   }
 
   async createProject(name: string, config?: Record<string, unknown>): Promise<string> {
@@ -51,8 +78,8 @@ export class AwsProvider implements DeploymentProviderInterface {
 
   async deploy(opts: DeployOptions): Promise<DeployResult> {
     const taskDef = opts.config?.["task_definition"] as string;
-    const cluster = opts.config?.["cluster"] as string ?? opts.projectId;
-    const service = opts.config?.["service"] as string ?? "app";
+    const cluster = (opts.config?.["cluster"] as string) ?? opts.projectId;
+    const service = (opts.config?.["service"] as string) ?? "app";
 
     if (taskDef) {
       await this.awsApi("ecs", "UpdateService", {
@@ -185,7 +212,12 @@ export class AwsProvider implements DeploymentProviderInterface {
         AllocatedStorage: Number(config?.["storage_gb"] ?? 20),
         PubliclyAccessible: false,
       });
-      const data = (await res.json()) as { DBInstance: { DBInstanceIdentifier: string; Endpoint: { Address: string; Port: number } } };
+      const data = (await res.json()) as {
+        DBInstance: {
+          DBInstanceIdentifier: string;
+          Endpoint: { Address: string; Port: number };
+        };
+      };
       const endpoint = data.DBInstance?.Endpoint;
       return {
         resourceId: data.DBInstance?.DBInstanceIdentifier ?? name,
@@ -211,7 +243,7 @@ export class AwsProvider implements DeploymentProviderInterface {
     if (type === "storage") {
       await this.awsApi("s3", "CreateBucket", {
         Bucket: name,
-        CreateBucketConfiguration: { LocationConstraint: this.region },
+        CreateBucketConfiguration: { LocationConstraint: this.getRegion() },
       });
       return { resourceId: name, type, name, config: config ?? {} };
     }
@@ -270,11 +302,143 @@ export class AwsProvider implements DeploymentProviderInterface {
   }
 
   async addDomain(_projectId: string, _domain: string): Promise<void> {
-    // AWS domain management via Route53 is complex — defer to direct API
+    // AWS domain management via Route53 — defer to direct API
   }
 
   async removeDomain(_projectId: string, _domain: string): Promise<void> {
-    // AWS domain management via Route53 is complex — defer to direct API
+    // AWS domain management via Route53 — defer to direct API
+  }
+
+  // ── Secrets Manager Operations ───────────────────────────────────────────
+
+  /**
+   * List secrets by prefix from AWS Secrets Manager.
+   */
+  async listSecrets(prefix?: string): Promise<{ name: string; arn: string; lastChanged: string }[]> {
+    const params: Record<string, unknown> = { MaxResults: 100 };
+    if (prefix) {
+      params["Filters"] = [{ Key: "name", Values: [prefix] }];
+    }
+
+    const res = await this.awsApi("secretsmanager", "ListSecrets", params);
+    const data = (await res.json()) as {
+      SecretList: { Name: string; ARN: string; LastChangedDate: number }[];
+    };
+
+    return (data.SecretList ?? []).map((s) => ({
+      name: s.Name,
+      arn: s.ARN,
+      lastChanged: new Date((s.LastChangedDate ?? 0) * 1000).toISOString(),
+    }));
+  }
+
+  /**
+   * Get a secret value from AWS Secrets Manager.
+   */
+  async getSecret(secretId: string): Promise<{ name: string; value: string; arn: string }> {
+    const res = await this.awsApi("secretsmanager", "GetSecretValue", {
+      SecretId: secretId,
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`AWS: GetSecretValue failed for ${secretId}: ${text}`);
+    }
+    const data = (await res.json()) as {
+      Name: string;
+      SecretString: string;
+      ARN: string;
+    };
+    return { name: data.Name, value: data.SecretString, arn: data.ARN };
+  }
+
+  /**
+   * Set/update a secret value in AWS Secrets Manager.
+   */
+  async putSecret(secretId: string, value: string): Promise<void> {
+    const res = await this.awsApi("secretsmanager", "PutSecretValue", {
+      SecretId: secretId,
+      SecretString: value,
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`AWS: PutSecretValue failed for ${secretId}: ${text}`);
+    }
+  }
+
+  /**
+   * Describe ECS services — returns running/desired task counts and deployment status.
+   */
+  async describeEcsServices(
+    cluster: string,
+    services: string[]
+  ): Promise<
+    {
+      name: string;
+      status: string;
+      runningCount: number;
+      desiredCount: number;
+      pendingCount: number;
+      deployments: { status: string; rolloutState: string; taskDefinition: string }[];
+    }[]
+  > {
+    const res = await this.awsApi("ecs", "DescribeServices", { cluster, services });
+    const data = (await res.json()) as {
+      services: {
+        serviceName: string;
+        status: string;
+        runningCount: number;
+        desiredCount: number;
+        pendingCount: number;
+        deployments: { status: string; rolloutState: string; taskDefinition: string }[];
+      }[];
+    };
+    return (data.services ?? []).map((s) => ({
+      name: s.serviceName,
+      status: s.status,
+      runningCount: s.runningCount,
+      desiredCount: s.desiredCount,
+      pendingCount: s.pendingCount,
+      deployments: s.deployments ?? [],
+    }));
+  }
+
+  /**
+   * Tail CloudWatch logs for an ECS service.
+   */
+  async tailLogs(
+    logGroup: string,
+    options?: { filterPattern?: string; startTime?: number; limit?: number }
+  ): Promise<{ timestamp: string; message: string }[]> {
+    const params: Record<string, unknown> = {
+      logGroupName: logGroup,
+      limit: options?.limit ?? 50,
+      interleaved: true,
+    };
+    if (options?.filterPattern) params["filterPattern"] = options.filterPattern;
+    if (options?.startTime) params["startTime"] = options.startTime;
+
+    const res = await this.awsApi("logs", "FilterLogEvents", params);
+    const data = (await res.json()) as {
+      events: { timestamp: number; message: string }[];
+    };
+
+    return (data.events ?? []).map((e) => ({
+      timestamp: new Date(e.timestamp).toISOString(),
+      message: e.message.trim(),
+    }));
+  }
+
+  // ── Internal ─────────────────────────────────────────────────────────────
+
+  private getRegion(): string {
+    return this.credentials?.region ?? "us-east-1";
+  }
+
+  private ensureConnected(): AwsCredentials {
+    if (!this.credentials) {
+      throw new Error("AWS: not connected. Call connect() first.");
+    }
+    return this.credentials;
   }
 
   private async awsApi(
@@ -282,19 +446,19 @@ export class AwsProvider implements DeploymentProviderInterface {
     action: string,
     params: Record<string, unknown>
   ): Promise<Response> {
-    const endpoint = `https://${service}.${this.region}.amazonaws.com`;
+    const creds = this.ensureConnected();
+    const endpoint = `https://${service}.${creds.region}.amazonaws.com`;
+    const body = JSON.stringify(params);
 
-    const res = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-amz-json-1.1",
-        "X-Amz-Target": `${getServiceTarget(service)}.${action}`,
-        Authorization: `AWS4-HMAC-SHA256 Credential=${this.accessKeyId}`,
-      },
-      body: JSON.stringify(params),
+    const signed = signRequest("POST", endpoint, service, body, creds, {
+      "X-Amz-Target": `${getServiceTarget(service)}.${action}`,
     });
 
-    return res;
+    return fetch(signed.url, {
+      method: signed.method,
+      headers: signed.headers,
+      body: signed.body,
+    });
   }
 }
 
@@ -309,6 +473,7 @@ function getServiceTarget(service: string): string {
     sts: "AWSSecurityTokenServiceV20110615",
     logs: "Logs_20140328",
     lambda: "AWSLambda",
+    secretsmanager: "secretsmanager",
   };
   return targets[service] ?? service;
 }
