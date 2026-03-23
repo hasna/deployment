@@ -1,6 +1,6 @@
 {
   "name": "@hasna/deployment",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "General-purpose deployment orchestration for AI agents — provision infrastructure, deploy apps, manage environments. CLI + MCP + REST + SDK.",
   "type": "module",
   "main": "dist/index.js",
@@ -34,8 +34,8 @@
     "LICENSE"
   ],
   "publishConfig": {
-    "access": "public",
-    "registry": "https://registry.npmjs.org/"
+    "registry": "https://registry.npmjs.org",
+    "access": "public"
   },
   "keywords": [
     "deployment",
@@ -52,7 +52,7 @@
     "cli"
   ],
   "author": "Andrei Hasna <andrei@hasna.com>",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
     "chalk": "^5.4.1",
