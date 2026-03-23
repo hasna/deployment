@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, existsSync } from "node:fs";
+import { copyFileSync, mkdirSync, existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
@@ -90,15 +90,32 @@ const MIGRATIONS = [
   `CREATE INDEX IF NOT EXISTS idx_blueprints_provider ON blueprints(provider_type)`,
 ];
 
+export function getDataDir(): string {
+  const home = process.env["HOME"] || process.env["USERPROFILE"] || homedir();
+  const newDir = join(home, ".hasna", "deployment");
+  const oldDir = join(home, ".open-deployment");
+
+  // Auto-migrate old dir to new location
+  if (existsSync(oldDir) && !existsSync(newDir)) {
+    mkdirSync(newDir, { recursive: true });
+    for (const file of readdirSync(oldDir)) {
+      const oldPath = join(oldDir, file);
+      if (statSync(oldPath).isFile()) {
+        copyFileSync(oldPath, join(newDir, file));
+      }
+    }
+  }
+
+  mkdirSync(newDir, { recursive: true });
+  return newDir;
+}
+
 function getDbPath(): string {
+  if (process.env["HASNA_DEPLOYMENT_DB_PATH"]) return process.env["HASNA_DEPLOYMENT_DB_PATH"];
   const envPath = process.env["OPEN_DEPLOYMENT_DB"];
   if (envPath) return envPath;
 
-  const dir = join(homedir(), ".open-deployment");
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
-  }
-  return join(dir, "deployment.db");
+  return join(getDataDir(), "deployment.db");
 }
 
 function runMigrations(database: Database): void {
