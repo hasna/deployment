@@ -1,7 +1,7 @@
 {
   "name": "@hasna/deployment",
   "version": "0.0.5",
-  "description": "General-purpose deployment orchestration for AI agents — provision infrastructure, deploy apps, manage environments. CLI + MCP + REST + SDK.",
+  "description": "General-purpose deployment orchestration for AI agents \u2014 provision infrastructure, deploy apps, manage environments. CLI + MCP + REST + SDK.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -25,7 +25,8 @@
     "test:coverage": "bun test --coverage",
     "typecheck": "tsc --noEmit",
     "build:dashboard": "cd dashboard && bun run build",
-    "prepublishOnly": "bun run build"
+    "prepublishOnly": "bun run build",
+    "postinstall": "mkdir -p $HOME/.hasna/deployment 2>/dev/null || true"
   },
   "files": [
     "dist",
