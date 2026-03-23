@@ -3,6 +3,9 @@ export * from "./types/index.js";
 
 // Database
 export { getDatabase, closeDatabase, resetDatabase, uuid, now, resolvePartialId } from "./db/database.js";
+
+// Database — PostgreSQL migrations
+export { PG_MIGRATIONS } from "./db/pg-migrations.js";
 export { createProject, getProject, listProjects, updateProject, deleteProject } from "./db/projects.js";
 export { createEnvironment, getEnvironment, listEnvironments, updateEnvironment, deleteEnvironment } from "./db/environments.js";
 export { createProvider, getProvider as getDbProvider, listProviders, updateProvider, deleteProvider } from "./db/providers.js";
