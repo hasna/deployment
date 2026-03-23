@@ -1,10 +1,12 @@
 import { Database } from "bun:sqlite";
+import { SqliteAdapter, ensureFeedbackTable, migrateDotfile } from "@hasna/cloud";
 import { randomUUID } from "node:crypto";
-import { copyFileSync, mkdirSync, existsSync, readdirSync, statSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
 let db: Database | null = null;
+let _adapter: SqliteAdapter | null = null;
 
 const MIGRATIONS = [
   // v1: Core tables
@@ -94,20 +96,8 @@ const MIGRATIONS = [
 
 export function getDataDir(): string {
   const home = process.env["HOME"] || process.env["USERPROFILE"] || homedir();
+  migrateDotfile("deployment");
   const newDir = join(home, ".hasna", "deployment");
-  const oldDir = join(home, ".open-deployment");
-
-  // Auto-migrate old dir to new location
-  if (existsSync(oldDir) && !existsSync(newDir)) {
-    mkdirSync(newDir, { recursive: true });
-    for (const file of readdirSync(oldDir)) {
-      const oldPath = join(oldDir, file);
-      if (statSync(oldPath).isFile()) {
-        copyFileSync(oldPath, join(newDir, file));
-      }
-    }
-  }
-
   mkdirSync(newDir, { recursive: true });
   return newDir;
 }
@@ -147,10 +137,10 @@ export function getDatabase(): Database {
   if (db) return db;
 
   const dbPath = getDbPath();
-  db = new Database(dbPath);
-  db.exec("PRAGMA journal_mode = WAL");
-  db.exec("PRAGMA foreign_keys = ON");
+  _adapter = new SqliteAdapter(dbPath);
+  db = _adapter.raw;
   runMigrations(db);
+  ensureFeedbackTable(_adapter);
   return db;
 }
 
@@ -158,6 +148,7 @@ export function closeDatabase(): void {
   if (db) {
     db.close();
     db = null;
+    _adapter = null;
   }
 }
 

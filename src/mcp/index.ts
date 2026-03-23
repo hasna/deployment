@@ -493,6 +493,25 @@ server.tool("test_hook", "Test hooks for a given event", {
   } catch (e) { return err(e); }
 });
 
+// ── Feedback ────────────────────────────────────────────────────────────────
+
+server.tool("send_feedback", "Send feedback about this service", {
+  message: z.string().describe("Feedback message"),
+  email: z.string().optional().describe("Contact email (optional)"),
+  category: z.enum(["bug", "feature", "general"]).optional().describe("Feedback category"),
+}, async (params) => {
+  try {
+    const { getDatabase } = await import("../db/database.js");
+    const db = getDatabase();
+    const pkg = require("../../package.json");
+    db.run(
+      "INSERT INTO feedback (message, email, category, version) VALUES (?, ?, ?, ?)",
+      [params.message, params.email || null, params.category || "general", pkg.version]
+    );
+    return ok({ message: "Feedback saved. Thank you!" });
+  } catch (e) { return err(e); }
+});
+
 // ── Start Server ────────────────────────────────────────────────────────────
 
 const transport = new StdioServerTransport();
