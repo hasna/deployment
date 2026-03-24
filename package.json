@@ -1,7 +1,7 @@
 {
   "name": "@hasna/deployment",
   "version": "0.0.5",
-  "description": "General-purpose deployment orchestration for AI agents \u2014 provision infrastructure, deploy apps, manage environments. CLI + MCP + REST + SDK.",
+  "description": "General-purpose deployment orchestration for AI agents — provision infrastructure, deploy apps, manage environments. CLI + MCP + REST + SDK.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -55,7 +55,7 @@
   "author": "Andrei Hasna <andrei@hasna.com>",
   "license": "Apache-2.0",
   "dependencies": {
-    "@hasna/cloud": "^0.1.0",
+    "@hasna/cloud": "0.1.5",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "chalk": "^5.4.1",
     "commander": "^13.1.0",
