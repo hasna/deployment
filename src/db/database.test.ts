@@ -1,4 +1,8 @@
+import { Database } from "bun:sqlite";
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import {
   getDatabase,
   closeDatabase,
@@ -58,6 +62,39 @@ describe("database", () => {
       expect(tableNames).toContain("blueprints");
       expect(tableNames).toContain("agents");
       expect(tableNames).toContain("_migrations");
+    });
+
+    it("treats the agent focus migration as already applied when the column exists", () => {
+      const dir = mkdtempSync(join(tmpdir(), "open-deployment-db-"));
+      const dbPath = join(dir, "deployment.db");
+      const existingDb = new Database(dbPath);
+
+      existingDb.exec(`
+        CREATE TABLE agents (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL UNIQUE,
+          type TEXT NOT NULL DEFAULT 'agent',
+          registered_at TEXT NOT NULL,
+          last_seen TEXT NOT NULL,
+          project_id TEXT
+        )
+      `);
+      existingDb.close();
+
+      process.env["OPEN_DEPLOYMENT_DB"] = dbPath;
+
+      expect(() => getDatabase()).not.toThrow();
+
+      const columns = getDatabase()
+        .query("PRAGMA table_info(agents)")
+        .all() as { name: string }[];
+      const projectIdColumns = columns.filter((column) => column.name === "project_id");
+
+      expect(projectIdColumns).toHaveLength(1);
+
+      closeDatabase();
+      rmSync(dir, { recursive: true, force: true });
+      process.env["OPEN_DEPLOYMENT_DB"] = ":memory:";
     });
   });
 

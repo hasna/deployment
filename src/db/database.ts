@@ -7,6 +7,7 @@ import { homedir } from "node:os";
 
 let db: Database | null = null;
 let _adapter: SqliteAdapter | null = null;
+const AGENTS_PROJECT_ID_MIGRATION = `ALTER TABLE agents ADD COLUMN project_id TEXT`;
 
 const MIGRATIONS = [
   // v1: Core tables
@@ -106,8 +107,9 @@ const MIGRATIONS = [
   `CREATE INDEX IF NOT EXISTS idx_providers_type ON providers(type)`,
   `CREATE INDEX IF NOT EXISTS idx_blueprints_provider ON blueprints(provider_type)`,
   // v2: Add project_id to agents for set_focus support
-  `ALTER TABLE agents ADD COLUMN project_id TEXT`,
+  AGENTS_PROJECT_ID_MIGRATION,
 ];
+const AGENTS_PROJECT_ID_MIGRATION_INDEX = MIGRATIONS.indexOf(AGENTS_PROJECT_ID_MIGRATION);
 
 export function getDataDir(): string {
   const home = process.env["HOME"] || process.env["USERPROFILE"] || homedir();
@@ -125,6 +127,14 @@ function getDbPath(): string {
   return join(getDataDir(), "deployment.db");
 }
 
+function hasColumn(database: Database, table: string, column: string): boolean {
+  const rows = database
+    .query(`PRAGMA table_info(${table})`)
+    .all() as { name: string }[];
+
+  return rows.some((row) => row.name === column);
+}
+
 function runMigrations(database: Database): void {
   database.exec(
     `CREATE TABLE IF NOT EXISTS _migrations (
@@ -140,6 +150,16 @@ function runMigrations(database: Database): void {
 
   for (let i = 0; i < MIGRATIONS.length; i++) {
     if (!appliedSet.has(i)) {
+      if (
+        i === AGENTS_PROJECT_ID_MIGRATION_INDEX &&
+        hasColumn(database, "agents", "project_id")
+      ) {
+        database
+          .query("INSERT INTO _migrations (id, applied_at) VALUES (?, ?)")
+          .run(i, now());
+        continue;
+      }
+
       database.exec(MIGRATIONS[i]!);
       database
         .query("INSERT INTO _migrations (id, applied_at) VALUES (?, ?)")
