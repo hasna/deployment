@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { resetDatabase, closeDatabase } from "../db/database.js";
+import { PACKAGE_VERSION } from "../lib/package.js";
 
 // The server/index.ts registers providers, seeds blueprints, and exports
 // { port, fetch: app.fetch }. We import it to get the fetch handler.
@@ -31,7 +32,7 @@ describe("server REST API", () => {
       expect(res.status).toBe(200);
       const body = (await res.json()) as { status: string; version: string };
       expect(body.status).toBe("ok");
-      expect(body.version).toBe("0.0.1");
+      expect(body.version).toBe(PACKAGE_VERSION);
     });
   });
 

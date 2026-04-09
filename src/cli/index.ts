@@ -23,6 +23,7 @@ import { RailwayProvider } from "../lib/railway.js";
 import { FlyioProvider } from "../lib/flyio.js";
 import { AwsProvider } from "../lib/aws.js";
 import { DigitalOceanProvider } from "../lib/digitalocean.js";
+import { PACKAGE_VERSION } from "../lib/package.js";
 import type { SourceType, ProviderType, EnvironmentType } from "../types/index.js";
 
 // Register all providers
@@ -72,7 +73,7 @@ function printJson(data: unknown): void {
 const program = new Command()
   .name("deployment")
   .description("General-purpose deployment orchestration for AI agents")
-  .version("0.0.1");
+  .version(PACKAGE_VERSION);
 
 // ── Project Commands ────────────────────────────────────────────────────────
 
@@ -952,10 +953,9 @@ program
     try {
       const { getDatabase } = await import("../db/database.js");
       const db = getDatabase();
-      const pkg = require("../../package.json");
       db.run(
         "INSERT INTO feedback (message, email, category, version) VALUES (?, ?, ?, ?)",
-        [message, opts.email || null, opts.category || "general", pkg.version]
+        [message, opts.email || null, opts.category || "general", PACKAGE_VERSION]
       );
       console.log(chalk.green("✓") + " Feedback saved. Thank you!");
     } catch (e) { handleError(e); }

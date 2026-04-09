@@ -23,7 +23,30 @@ import { RailwayProvider } from "../lib/railway.js";
 import { FlyioProvider } from "../lib/flyio.js";
 import { AwsProvider } from "../lib/aws.js";
 import { DigitalOceanProvider } from "../lib/digitalocean.js";
+import { PACKAGE_DESCRIPTION, PACKAGE_VERSION } from "../lib/package.js";
 import type { SourceType, ProviderType, EnvironmentType } from "../types/index.js";
+
+function handleProcessFlags(argv: readonly string[]): void {
+  if (argv.includes("--help") || argv.includes("-h")) {
+    console.log(`${PACKAGE_DESCRIPTION}
+
+Usage: deployment-mcp [options]
+
+Options:
+  -h, --help     Show this help message
+  -V, --version  Show the current version`);
+    process.exit(0);
+  }
+
+  if (argv.includes("--version") || argv.includes("-V")) {
+    console.log(PACKAGE_VERSION);
+    process.exit(0);
+  }
+}
+
+if (import.meta.main) {
+  handleProcessFlags(process.argv.slice(2));
+}
 
 // Register providers
 registerProvider(new VercelProvider());
@@ -36,7 +59,7 @@ registerProvider(new DigitalOceanProvider());
 // Seed blueprints
 seedBuiltinBlueprints();
 
-const server = new McpServer({ name: "deployment", version: "0.0.1" });
+const server = new McpServer({ name: "deployment", version: PACKAGE_VERSION });
 
 function ok(data: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
@@ -648,10 +671,9 @@ server.tool("send_feedback", "Send feedback about this service", {
   try {
     const { getDatabase } = await import("../db/database.js");
     const db = getDatabase();
-    const pkg = require("../../package.json");
     db.run(
       "INSERT INTO feedback (message, email, category, version) VALUES (?, ?, ?, ?)",
-      [params.message, params.email || null, params.category || "general", pkg.version]
+      [params.message, params.email || null, params.category || "general", PACKAGE_VERSION]
     );
     return ok({ message: "Feedback saved. Thank you!" });
   } catch (e) { return err(e); }

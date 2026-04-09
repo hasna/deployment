@@ -23,7 +23,30 @@ import { RailwayProvider } from "../lib/railway.js";
 import { FlyioProvider } from "../lib/flyio.js";
 import { AwsProvider } from "../lib/aws.js";
 import { DigitalOceanProvider } from "../lib/digitalocean.js";
+import { PACKAGE_DESCRIPTION, PACKAGE_VERSION } from "../lib/package.js";
 import type { SourceType, ProviderType, EnvironmentType } from "../types/index.js";
+
+function handleProcessFlags(argv: readonly string[]): void {
+  if (argv.includes("--help") || argv.includes("-h")) {
+    console.log(`${PACKAGE_DESCRIPTION}
+
+Usage: deployment-serve [options]
+
+Options:
+  -h, --help     Show this help message
+  -V, --version  Show the current version`);
+    process.exit(0);
+  }
+
+  if (argv.includes("--version") || argv.includes("-V")) {
+    console.log(PACKAGE_VERSION);
+    process.exit(0);
+  }
+}
+
+if (import.meta.main) {
+  handleProcessFlags(process.argv.slice(2));
+}
 
 // Register providers
 registerProvider(new VercelProvider());
@@ -43,7 +66,7 @@ app.use("*", cors());
 // ── Health ──────────────────────────────────────────────────────────────────
 
 app.get("/api/health", (c) =>
-  c.json({ status: "ok", timestamp: new Date().toISOString(), version: "0.0.1" })
+  c.json({ status: "ok", timestamp: new Date().toISOString(), version: PACKAGE_VERSION })
 );
 
 // ── Projects ────────────────────────────────────────────────────────────────
@@ -408,7 +431,9 @@ app.post("/api/hooks/test/:event", async (c) => {
 
 // ── Start ───────────────────────────────────────────────────────────────────
 
-console.log(`🚀 deployment server running on http://localhost:${PORT}`);
+if (import.meta.main) {
+  console.log(`deployment server running on http://localhost:${PORT}`);
+}
 
 export default {
   port: PORT,
