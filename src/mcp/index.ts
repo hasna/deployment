@@ -425,12 +425,13 @@ server.tool("logs_tail", "Tail CloudWatch logs for an ECS service", {
     const { resolveCredentials } = await import("../lib/aws-auth.js");
     const provider = new AwsProvider();
     const creds = await resolveCredentials();
-    await provider.connect({
+    const connection: Record<string, string> = {
       access_key_id: creds.accessKeyId,
       secret_access_key: creds.secretAccessKey,
-      session_token: creds.sessionToken,
       region: creds.region,
-    });
+    };
+    if (creds.sessionToken) connection["session_token"] = creds.sessionToken;
+    await provider.connect(connection);
     const startTime = params.minutes_ago
       ? Date.now() - params.minutes_ago * 60 * 1000
       : undefined;
@@ -453,12 +454,13 @@ server.tool("ecs_status", "Get ECS service health — running tasks, CPU, deploy
     const { resolveCredentials } = await import("../lib/aws-auth.js");
     const provider = new AwsProvider();
     const creds = await resolveCredentials(params.region ? { region: params.region } : undefined);
-    await provider.connect({
+    const connection: Record<string, string> = {
       access_key_id: creds.accessKeyId,
       secret_access_key: creds.secretAccessKey,
-      session_token: creds.sessionToken,
       region: creds.region,
-    });
+    };
+    if (creds.sessionToken) connection["session_token"] = creds.sessionToken;
+    await provider.connect(connection);
     const status = await provider.describeEcsServices(params.cluster, params.services);
     return ok(status);
   } catch (e) { return err(e); }

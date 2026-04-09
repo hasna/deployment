@@ -514,11 +514,12 @@ function maskValue(value: string): string {
 async function getAwsProvider(): Promise<AwsProvider> {
   const provider = new AwsProvider();
   const creds = await resolveCredentials();
-  await provider.connect({
+  const connection: Record<string, string> = {
     access_key_id: creds.accessKeyId,
     secret_access_key: creds.secretAccessKey,
-    session_token: creds.sessionToken,
     region: creds.region,
-  });
+  };
+  if (creds.sessionToken) connection["session_token"] = creds.sessionToken;
+  await provider.connect(connection);
   return provider;
 }
