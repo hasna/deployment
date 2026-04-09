@@ -6,6 +6,7 @@ import {
   listRegisteredProviders,
   hasProvider,
   clearProviders,
+  createBaseProvider,
 } from "./provider.js";
 import type {
   DeploymentProviderInterface,
@@ -125,6 +126,40 @@ describe("provider registry", () => {
       clearProviders();
       expect(hasProvider("vercel")).toBe(false);
       expect(listRegisteredProviders().length).toBe(0);
+    });
+  });
+
+  describe("createBaseProvider", () => {
+    it("returns a provider shell with the requested type", () => {
+      const provider = createBaseProvider("aws");
+      expect(provider.type).toBe("aws");
+    });
+
+    it("throws consistent not implemented errors for each default method", async () => {
+      const provider = createBaseProvider("aws") as Record<string, (...args: any[]) => Promise<unknown>>;
+      const cases: Array<[string, any[]]> = [
+        ["connect", [{}]],
+        ["createProject", ["demo"]],
+        ["deleteProject", ["proj-1"]],
+        ["deploy", [{}]],
+        ["getDeploymentStatus", ["dep-1"]],
+        ["getDeploymentLogs", ["dep-1"]],
+        ["rollback", ["dep-1"]],
+        ["provisionResource", ["database", "primary"]],
+        ["destroyResource", ["res-1"]],
+        ["listResources", []],
+        ["setEnvVars", ["proj-1", { KEY: "value" }]],
+        ["getEnvVars", ["proj-1"]],
+        ["getDomains", ["proj-1"]],
+        ["addDomain", ["proj-1", "example.com"]],
+        ["removeDomain", ["proj-1", "example.com"]],
+      ];
+
+      for (const [method, args] of cases) {
+        await expect(provider[method](...args)).rejects.toThrow(
+          `aws: ${method}() not implemented`
+        );
+      }
     });
   });
 });
