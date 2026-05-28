@@ -71,13 +71,19 @@ describe("mcp/index", () => {
       "rotate_secret",
       "logs_tail",
       "ecs_status",
+      "deploy_sequence",
+      "deploy_github",
+      "gh_trigger",
+      "gh_status",
+      "gh_logs",
+      "pre_deploy_check",
       "register_agent",
       "list_agents",
       "describe_tools",
       "search_tools",
     ];
-    // The TOOL_CATALOG in the source has 37 entries
-    expect(expectedTools.length).toBe(37);
+    // The TOOL_CATALOG in the source has 43 entries
+    expect(expectedTools.length).toBe(43);
     // Each name is unique
     const unique = new Set(expectedTools);
     expect(unique.size).toBe(expectedTools.length);

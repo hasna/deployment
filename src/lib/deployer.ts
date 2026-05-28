@@ -1,5 +1,6 @@
 import { getProvider } from "./provider.js";
 import { getDeploymentSecrets, injectSecretsToProvider, checkSecretParity } from "./secrets-integration.js";
+import { triggerWorkflow, getLatestRun, getRunStatus, type GitHubWorkflowRun } from "./github-actions.js";
 import { createDeployment, updateDeployment, getLatestDeployment } from "../db/deployments.js";
 import { getEnvironment } from "../db/environments.js";
 import { getProject } from "../db/projects.js";
@@ -320,6 +321,108 @@ export async function getLogs(
   if (!id) return "No deployments found";
 
   return provider.getDeploymentLogs(id);
+}
+
+// ── Sequential Multi-Environment Deploy ──────────────────────────────────
+
+export interface SequenceInput {
+  projectId: string;
+  environmentIds: string[];
+  image?: string;
+  commitSha?: string;
+  version?: string;
+  config?: Record<string, unknown>;
+}
+
+export interface SequenceResult {
+  total: number;
+  succeeded: string[];
+  failed: { envId: string; error: string }[];
+}
+
+/**
+ * Deploy to multiple environments sequentially.
+ * Stops on first failure (fail-fast).
+ */
+export async function deploySequence(input: SequenceInput): Promise<SequenceResult> {
+  const succeeded: string[] = [];
+  const failed: { envId: string; error: string }[] = [];
+
+  for (const envId of input.environmentIds) {
+    try {
+      await deploy({
+        projectId: input.projectId,
+        environmentId: envId,
+        image: input.image,
+        commitSha: input.commitSha,
+        version: input.version,
+        config: input.config,
+      });
+      succeeded.push(envId);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      failed.push({ envId, error: message });
+      break; // fail-fast
+    }
+  }
+
+  return { total: input.environmentIds.length, succeeded, failed };
+}
+
+// ── GitHub Actions Deploy ────────────────────────────────────────────────
+
+export interface GitHubDeployInput {
+  repo: string;
+  workflow: string;
+  environment: string;
+  inputs?: Record<string, string>;
+}
+
+export interface GitHubDeployResult {
+  triggered: boolean;
+  run: GitHubWorkflowRun | null;
+  status: "success" | "failure" | "in_progress" | "unknown";
+}
+
+/**
+ * Trigger a deployment via GitHub Actions and optionally poll for completion.
+ */
+export async function deployViaGitHub(
+  input: GitHubDeployInput,
+  poll: boolean = false,
+  maxPollMinutes: number = 45
+): Promise<GitHubDeployResult> {
+  const allInputs = { environment: input.environment, ...input.inputs };
+  triggerWorkflow(input.repo, input.workflow, allInputs);
+
+  if (!poll) {
+    return { triggered: true, run: null, status: "in_progress" };
+  }
+
+  // Wait a bit for the run to appear
+  await new Promise((r) => setTimeout(r, 10000));
+
+  const maxAttempts = maxPollMinutes * 6; // poll every 10s
+  for (let i = 0; i < maxAttempts; i++) {
+    const runs = getLatestRun(input.repo, input.workflow, 1);
+    const run = runs[0];
+    if (!run) {
+      await new Promise((r) => setTimeout(r, 10000));
+      continue;
+    }
+
+    if (run.status === "completed") {
+      return {
+        triggered: true,
+        run,
+        status: run.conclusion === "success" ? "success" : "failure",
+      };
+    }
+
+    await new Promise((r) => setTimeout(r, 10000));
+  }
+
+  return { triggered: true, run: null, status: "unknown" };
 }
 
 async function pollDeploymentStatus(

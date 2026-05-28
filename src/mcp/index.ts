@@ -9,7 +9,7 @@ import { listDeployments } from "../db/deployments.js";
 import { listResources, deleteResource } from "../db/resources.js";
 import { listBlueprints, getBlueprint } from "../db/blueprints.js";
 import { registerAgent, listAgents, heartbeat as dbHeartbeat, setFocus as dbSetFocus } from "../db/agents.js";
-import { deploy, rollback, promote, getStatus, getLogs, previewDeploy } from "../lib/deployer.js";
+import { deploy, rollback, promote, getStatus, getLogs, previewDeploy, deploySequence, deployViaGitHub } from "../lib/deployer.js";
 import { applyBlueprint, seedBuiltinBlueprints } from "../lib/blueprints.js";
 import { setDeploymentSecret, listDeploymentSecrets, diffSecrets, checkSecretParity, syncSecrets, setConfigParam, listConfigParams, rotateSecret, initSecrets } from "../lib/secrets-integration.js";
 import { registerProvider, getProvider as getRegisteredProvider } from "../lib/provider.js";
@@ -23,7 +23,12 @@ import { RailwayProvider } from "../lib/railway.js";
 import { FlyioProvider } from "../lib/flyio.js";
 import { AwsProvider } from "../lib/aws.js";
 import { DigitalOceanProvider } from "../lib/digitalocean.js";
+<<<<<<< Updated upstream
 import { PACKAGE_DESCRIPTION, PACKAGE_VERSION } from "../lib/package.js";
+=======
+import { triggerWorkflow, getLatestRun, getRunStatus, getFailureLogs, isGhAuthenticated } from "../lib/github-actions.js";
+import { runPreDeployChecks } from "../lib/pre-deploy-checks.js";
+>>>>>>> Stashed changes
 import type { SourceType, ProviderType, EnvironmentType } from "../types/index.js";
 
 function handleProcessFlags(argv: readonly string[]): void {
@@ -104,6 +109,12 @@ const TOOL_CATALOG = [
   { name: "rotate_secret", description: "Rotate an internal secret with new random value" },
   { name: "logs_tail", description: "Tail CloudWatch logs for an ECS service" },
   { name: "ecs_status", description: "Get ECS service health — running tasks, CPU, deployments" },
+  { name: "deploy_sequence", description: "Deploy to multiple environments sequentially" },
+  { name: "deploy_github", description: "Deploy via GitHub Actions workflow_dispatch" },
+  { name: "gh_trigger", description: "Trigger a GitHub Actions workflow" },
+  { name: "gh_status", description: "Get GitHub Actions workflow run status" },
+  { name: "gh_logs", description: "Get failure logs from a GitHub Actions run" },
+  { name: "pre_deploy_check", description: "Run all pre-deploy validation checks" },
   { name: "register_agent", description: "Register a deployer agent" },
   { name: "list_agents", description: "List all registered agents" },
   { name: "heartbeat", description: "Update last_seen_at to signal agent is active" },
@@ -489,6 +500,99 @@ server.tool("ecs_status", "Get ECS service health — running tasks, CPU, deploy
   } catch (e) { return err(e); }
 });
 
+// ── Sequence & GitHub Deploy Tools ──────────────────────────────────────────
+
+server.tool("deploy_sequence", "Deploy to multiple environments sequentially", {
+  project_id: z.string().describe("Project ID"),
+  environment_ids: z.array(z.string()).describe("Environment IDs in deploy order"),
+  image: z.string().optional(),
+  commit_sha: z.string().optional(),
+  version: z.string().optional(),
+}, async (params) => {
+  try {
+    return ok(await deploySequence({
+      projectId: params.project_id,
+      environmentIds: params.environment_ids,
+      image: params.image,
+      commitSha: params.commit_sha,
+      version: params.version,
+    }));
+  } catch (e) { return err(e); }
+});
+
+server.tool("deploy_github", "Deploy via GitHub Actions workflow_dispatch", {
+  repo: z.string().describe("GitHub repo (owner/name)"),
+  workflow: z.string().describe("Workflow filename (e.g. deploy.yml)"),
+  environment: z.string().describe("Target environment"),
+  inputs: z.record(z.string()).optional().describe("Additional workflow inputs"),
+  poll: z.boolean().optional().describe("Wait for completion (default: false)"),
+}, async (params) => {
+  try {
+    return ok(await deployViaGitHub(
+      { repo: params.repo, workflow: params.workflow, environment: params.environment, inputs: params.inputs },
+      params.poll ?? false
+    ));
+  } catch (e) { return err(e); }
+});
+
+// ── GitHub Actions Tools ────────────────────────────────────────────────────
+
+server.tool("gh_trigger", "Trigger a GitHub Actions workflow", {
+  repo: z.string().describe("GitHub repo (owner/name)"),
+  workflow: z.string().describe("Workflow filename (e.g. deploy.yml)"),
+  inputs: z.record(z.string()).optional().describe("Workflow dispatch inputs"),
+}, async (params) => {
+  try {
+    if (!isGhAuthenticated()) {
+      return err(new Error("GitHub CLI not authenticated. Run: gh auth login"));
+    }
+    return ok(triggerWorkflow(params.repo, params.workflow, params.inputs));
+  } catch (e) { return err(e); }
+});
+
+server.tool("gh_status", "Get GitHub Actions workflow run status", {
+  repo: z.string().describe("GitHub repo (owner/name)"),
+  workflow: z.string().optional().describe("Workflow filename (e.g. deploy.yml)"),
+  run_id: z.number().optional().describe("Specific run ID to check"),
+  limit: z.number().optional().describe("Number of recent runs (default: 3)"),
+}, async (params) => {
+  try {
+    if (params.run_id) {
+      return ok(getRunStatus(params.repo, params.run_id));
+    }
+    if (params.workflow) {
+      return ok(getLatestRun(params.repo, params.workflow, params.limit ?? 3));
+    }
+    return err(new Error("Provide either workflow or run_id"));
+  } catch (e) { return err(e); }
+});
+
+server.tool("gh_logs", "Get failure logs from a GitHub Actions run", {
+  repo: z.string().describe("GitHub repo (owner/name)"),
+  run_id: z.number().describe("Workflow run ID"),
+  lines: z.number().optional().describe("Number of log lines (default: 30)"),
+}, async (params) => {
+  try {
+    return ok({ logs: getFailureLogs(params.repo, params.run_id, params.lines ?? 30) });
+  } catch (e) { return err(e); }
+});
+
+// ── Pre-Deploy Check Tools ──────────────────────────────────────────────────
+
+server.tool("pre_deploy_check", "Run all pre-deploy validation checks", {
+  project: z.string().describe("Project name"),
+  environment: z.string().describe("Environment name"),
+  database_url: z.string().optional().describe("DATABASE_URL to validate"),
+  image: z.string().optional().describe("Container image ref to validate"),
+}, async (params) => {
+  try {
+    const config: Record<string, unknown> = {};
+    if (params.database_url) config["database_url"] = params.database_url;
+    if (params.image) config["image"] = params.image;
+    return ok(await runPreDeployChecks(params.project, params.environment, config));
+  } catch (e) { return err(e); }
+});
+
 // ── Agent Tools ─────────────────────────────────────────────────────────────
 
 server.tool("register_agent", "Register a deployer agent", {
@@ -599,21 +703,32 @@ server.tool("overview", "All projects/environments/deployments summary", {}, asy
 
 // ── Dry-Run Deploy Tool ──────────────────────────────────────────────────
 
-server.tool("deploy_dry_run", "Preview deploy without executing", {
+server.tool("deploy_dry_run", "Preview deploy without executing — runs all pre-deploy checks", {
   project_id: z.string().describe("Project ID"),
   environment_id: z.string().describe("Environment ID"),
   image: z.string().optional(),
   commit_sha: z.string().optional(),
   version: z.string().optional(),
+  database_url: z.string().optional().describe("DATABASE_URL to validate"),
+  schema_check_command: z.string().optional().describe("Command to check schema drift"),
 }, async (params) => {
   try {
-    return ok(previewDeploy({
+    const preview = previewDeploy({
       projectId: params.project_id,
       environmentId: params.environment_id,
       image: params.image,
       commitSha: params.commit_sha,
       version: params.version,
-    }));
+    });
+
+    const config: Record<string, unknown> = {};
+    if (params.database_url) config["database_url"] = params.database_url;
+    if (params.image) config["image"] = params.image;
+    if (params.schema_check_command) config["schema_check_command"] = params.schema_check_command;
+
+    const checks = await runPreDeployChecks(preview.project, preview.environment, config);
+
+    return ok({ preview, checks });
   } catch (e) { return err(e); }
 });
 
