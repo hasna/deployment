@@ -32,6 +32,21 @@ deployment-mcp
 
 40 tools available.
 
+## HTTP mode
+
+Long-lived Streamable HTTP transport for shared agent sessions (binds `127.0.0.1` only):
+
+```bash
+deployment-mcp --http              # default port 8813
+deployment-mcp --http --port 8813
+MCP_HTTP=1 MCP_HTTP_PORT=8813 deployment-mcp
+```
+
+- `GET /health` → `{"status":"ok","name":"deployment"}`
+- `POST /mcp` — Streamable HTTP MCP endpoint (also mounted on `deployment-serve`)
+
+Stdio remains the default transport for gradual rollout.
+
 ## REST API
 
 ```bash

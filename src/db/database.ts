@@ -107,16 +107,12 @@ const MIGRATIONS = [
   `CREATE INDEX IF NOT EXISTS idx_providers_type ON providers(type)`,
   `CREATE INDEX IF NOT EXISTS idx_blueprints_provider ON blueprints(provider_type)`,
   // v2: Add project_id to agents for set_focus support
-<<<<<<< Updated upstream
   AGENTS_PROJECT_ID_MIGRATION,
-=======
-  `ALTER TABLE agents ADD COLUMN project_id TEXT`,
   // v3: Deployment history tracking
   `ALTER TABLE deployments ADD COLUMN failure_reason TEXT NOT NULL DEFAULT ''`,
   `ALTER TABLE deployments ADD COLUMN build_skipped INTEGER NOT NULL DEFAULT 0`,
   `ALTER TABLE deployments ADD COLUMN duration_seconds INTEGER NOT NULL DEFAULT 0`,
   `ALTER TABLE deployments ADD COLUMN triggered_by TEXT NOT NULL DEFAULT ''`,
->>>>>>> Stashed changes
 ];
 const AGENTS_PROJECT_ID_MIGRATION_INDEX = MIGRATIONS.indexOf(AGENTS_PROJECT_ID_MIGRATION);
 

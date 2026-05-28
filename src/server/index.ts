@@ -25,6 +25,7 @@ import { AwsProvider } from "../lib/aws.js";
 import { DigitalOceanProvider } from "../lib/digitalocean.js";
 import { PACKAGE_DESCRIPTION, PACKAGE_VERSION } from "../lib/package.js";
 import type { SourceType, ProviderType, EnvironmentType } from "../types/index.js";
+import { handleMcpHttpRequest, mcpHealthJson } from "../mcp/http.js";
 
 function handleProcessFlags(argv: readonly string[]): void {
   if (argv.includes("--help") || argv.includes("-h")) {
@@ -62,6 +63,12 @@ const PORT = Number(process.env["OPEN_DEPLOYMENT_PORT"] ?? 3460);
 
 const app = new Hono();
 app.use("*", cors());
+
+app.get("/health", (c) => c.json(mcpHealthJson()));
+app.all("/mcp", async (c) => {
+  const { buildServer } = await import("../mcp/index.js");
+  return handleMcpHttpRequest(c.req.raw, buildServer);
+});
 
 // ── Health ──────────────────────────────────────────────────────────────────
 

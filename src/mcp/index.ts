@@ -23,12 +23,9 @@ import { RailwayProvider } from "../lib/railway.js";
 import { FlyioProvider } from "../lib/flyio.js";
 import { AwsProvider } from "../lib/aws.js";
 import { DigitalOceanProvider } from "../lib/digitalocean.js";
-<<<<<<< Updated upstream
 import { PACKAGE_DESCRIPTION, PACKAGE_VERSION } from "../lib/package.js";
-=======
 import { triggerWorkflow, getLatestRun, getRunStatus, getFailureLogs, isGhAuthenticated } from "../lib/github-actions.js";
 import { runPreDeployChecks } from "../lib/pre-deploy-checks.js";
->>>>>>> Stashed changes
 import type { SourceType, ProviderType, EnvironmentType } from "../types/index.js";
 
 function handleProcessFlags(argv: readonly string[]): void {
@@ -64,6 +61,7 @@ registerProvider(new DigitalOceanProvider());
 // Seed blueprints
 seedBuiltinBlueprints();
 
+export function buildServer(): McpServer {
 const server = new McpServer({ name: "deployment", version: PACKAGE_VERSION });
 
 function ok(data: unknown) {
@@ -796,5 +794,25 @@ server.tool("send_feedback", "Send feedback about this service", {
 
 // ── Start Server ────────────────────────────────────────────────────────────
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
+return server;
+}
+
+async function main() {
+  const argv = process.argv.slice(2);
+  if ((await import("./http.js")).isHttpMode(argv)) {
+    const { resolveMcpHttpPort, startHttpServer } = await import("./http.js");
+    const port = resolveMcpHttpPort(argv);
+    await startHttpServer(buildServer, port);
+    await new Promise(() => {});
+    return;
+  }
+  const transport = new StdioServerTransport();
+  await buildServer().connect(transport);
+}
+
+if (import.meta.main) {
+  main().catch((err) => {
+    process.stderr.write(`Fatal: ${(err as Error).message}\n`);
+    process.exit(1);
+  });
+}
