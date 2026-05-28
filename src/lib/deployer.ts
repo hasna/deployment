@@ -1,6 +1,6 @@
 import { getProvider } from "./provider.js";
 import { getDeploymentSecrets, injectSecretsToProvider, checkSecretParity } from "./secrets-integration.js";
-import { triggerWorkflow, getLatestRun, getRunStatus, type GitHubWorkflowRun } from "./github-actions.js";
+import { triggerWorkflow, getLatestRun, type GitHubWorkflowRun } from "./github-actions.js";
 import { createDeployment, updateDeployment, getLatestDeployment } from "../db/deployments.js";
 import { getEnvironment } from "../db/environments.js";
 import { getProject } from "../db/projects.js";

@@ -37,7 +37,7 @@ export async function handleMcpHttpRequest(
 }
 
 export async function startHttpServer(
-  buildServer: () => McpServer,
+  _buildServer: () => McpServer,
   port: number,
 ): Promise<{ port: number; stop: () => void }> {
   const { default: appModule } = await import("../server/index.js");
