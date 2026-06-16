@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { registerEventsCommands } from "@hasna/events/commander";
 import { Command } from "commander";
 import chalk from "chalk";
 import { createProject, getProject, listProjects, deleteProject } from "../db/projects.js";
@@ -960,5 +961,6 @@ program
       console.log(chalk.green("✓") + " Feedback saved. Thank you!");
     } catch (e) { handleError(e); }
   });
+registerEventsCommands(program, { source: "deployment" });
 
 program.parse(process.argv);
