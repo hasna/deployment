@@ -12,6 +12,13 @@ import {
   resolvePartialId,
 } from "./database.js";
 
+interface ColumnInfo {
+  name: string;
+  type: string;
+  notnull: number;
+  dflt_value: string | null;
+}
+
 describe("database", () => {
   beforeEach(() => {
     process.env["OPEN_DEPLOYMENT_DB"] = ":memory:";
@@ -91,6 +98,104 @@ describe("database", () => {
       const projectIdColumns = columns.filter((column) => column.name === "project_id");
 
       expect(projectIdColumns).toHaveLength(1);
+
+      closeDatabase();
+      rmSync(dir, { recursive: true, force: true });
+      process.env["OPEN_DEPLOYMENT_DB"] = ":memory:";
+    });
+
+    it("treats deployment history migrations as already applied when the columns exist", () => {
+      const dir = mkdtempSync(join(tmpdir(), "open-deployment-db-"));
+      const dbPath = join(dir, "deployment.db");
+      const existingDb = new Database(dbPath);
+
+      existingDb.exec(`
+        CREATE TABLE deployments (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          environment_id TEXT NOT NULL,
+          version TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL DEFAULT 'pending',
+          url TEXT NOT NULL DEFAULT '',
+          image TEXT NOT NULL DEFAULT '',
+          commit_sha TEXT NOT NULL DEFAULT '',
+          logs TEXT NOT NULL DEFAULT '',
+          started_at TEXT NOT NULL DEFAULT '',
+          completed_at TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          failure_reason TEXT NOT NULL DEFAULT '',
+          build_skipped INTEGER NOT NULL DEFAULT 0,
+          duration_seconds INTEGER NOT NULL DEFAULT 0,
+          triggered_by TEXT NOT NULL DEFAULT ''
+        )
+      `);
+      existingDb.close();
+
+      process.env["OPEN_DEPLOYMENT_DB"] = dbPath;
+
+      expect(() => getDatabase()).not.toThrow();
+
+      const columns = getDatabase()
+        .query("PRAGMA table_info(deployments)")
+        .all() as ColumnInfo[];
+
+      expect(columns.find((column) => column.name === "failure_reason")).toMatchObject({
+        type: "TEXT",
+        notnull: 1,
+        dflt_value: "''",
+      });
+      expect(columns.find((column) => column.name === "build_skipped")).toMatchObject({
+        type: "INTEGER",
+        notnull: 1,
+        dflt_value: "0",
+      });
+      expect(columns.find((column) => column.name === "duration_seconds")).toMatchObject({
+        type: "INTEGER",
+        notnull: 1,
+        dflt_value: "0",
+      });
+      expect(columns.find((column) => column.name === "triggered_by")).toMatchObject({
+        type: "TEXT",
+        notnull: 1,
+        dflt_value: "''",
+      });
+
+      closeDatabase();
+      rmSync(dir, { recursive: true, force: true });
+      process.env["OPEN_DEPLOYMENT_DB"] = ":memory:";
+    });
+
+    it("does not mark incompatible existing columns as applied", () => {
+      const dir = mkdtempSync(join(tmpdir(), "open-deployment-db-"));
+      const dbPath = join(dir, "deployment.db");
+      const existingDb = new Database(dbPath);
+
+      existingDb.exec(`
+        CREATE TABLE deployments (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          environment_id TEXT NOT NULL,
+          version TEXT,
+          status TEXT,
+          url TEXT,
+          image TEXT,
+          commit_sha TEXT,
+          logs TEXT,
+          started_at TEXT,
+          completed_at TEXT,
+          created_at TEXT NOT NULL,
+          failure_reason INTEGER,
+          build_skipped TEXT,
+          duration_seconds TEXT,
+          triggered_by TEXT
+        )
+      `);
+      existingDb.close();
+
+      process.env["OPEN_DEPLOYMENT_DB"] = dbPath;
+
+      expect(() => getDatabase()).toThrow("duplicate column name: failure_reason");
+      expect(() => getDatabase()).toThrow("duplicate column name: failure_reason");
 
       closeDatabase();
       rmSync(dir, { recursive: true, force: true });

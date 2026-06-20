@@ -7,7 +7,21 @@ import { homedir } from "node:os";
 
 let db: Database | null = null;
 let _adapter: SqliteAdapter | null = null;
-const AGENTS_PROJECT_ID_MIGRATION = `ALTER TABLE agents ADD COLUMN project_id TEXT`;
+
+interface SqliteColumnInfo {
+  name: string;
+  type: string;
+  notnull: number;
+  dflt_value: string | null;
+}
+
+interface AddColumnMigration {
+  table: string;
+  column: string;
+  type: string;
+  notNull: boolean;
+  defaultValue: string | null;
+}
 
 const MIGRATIONS = [
   // v1: Core tables
@@ -107,14 +121,13 @@ const MIGRATIONS = [
   `CREATE INDEX IF NOT EXISTS idx_providers_type ON providers(type)`,
   `CREATE INDEX IF NOT EXISTS idx_blueprints_provider ON blueprints(provider_type)`,
   // v2: Add project_id to agents for set_focus support
-  AGENTS_PROJECT_ID_MIGRATION,
+  `ALTER TABLE agents ADD COLUMN project_id TEXT`,
   // v3: Deployment history tracking
   `ALTER TABLE deployments ADD COLUMN failure_reason TEXT NOT NULL DEFAULT ''`,
   `ALTER TABLE deployments ADD COLUMN build_skipped INTEGER NOT NULL DEFAULT 0`,
   `ALTER TABLE deployments ADD COLUMN duration_seconds INTEGER NOT NULL DEFAULT 0`,
   `ALTER TABLE deployments ADD COLUMN triggered_by TEXT NOT NULL DEFAULT ''`,
 ];
-const AGENTS_PROJECT_ID_MIGRATION_INDEX = MIGRATIONS.indexOf(AGENTS_PROJECT_ID_MIGRATION);
 
 export function getDataDir(): string {
   const home = process.env["HOME"] || process.env["USERPROFILE"] || homedir();
@@ -132,12 +145,58 @@ function getDbPath(): string {
   return join(getDataDir(), "deployment.db");
 }
 
-function hasColumn(database: Database, table: string, column: string): boolean {
+function getColumnInfo(
+  database: Database,
+  table: string,
+  column: string
+): SqliteColumnInfo | null {
   const rows = database
     .query(`PRAGMA table_info(${table})`)
-    .all() as { name: string }[];
+    .all() as SqliteColumnInfo[];
 
-  return rows.some((row) => row.name === column);
+  return rows.find((row) => row.name === column) ?? null;
+}
+
+function markMigrationApplied(database: Database, id: number): void {
+  database
+    .query("INSERT INTO _migrations (id, applied_at) VALUES (?, ?)")
+    .run(id, now());
+}
+
+function parseAddColumnMigration(migration: string): AddColumnMigration | null {
+  const match = migration.match(
+    /^ALTER\s+TABLE\s+([A-Za-z_][A-Za-z0-9_]*)\s+ADD\s+COLUMN\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+(.+))?$/i
+  );
+  if (!match) return null;
+
+  const definition = match[3]?.trim() ?? "";
+  const type = definition.split(/\s+/)[0]?.toUpperCase() ?? "";
+  const defaultMatch = definition.match(/\bDEFAULT\s+(.+)$/i);
+
+  return {
+    table: match[1]!,
+    column: match[2]!,
+    type,
+    notNull: /\bNOT\s+NULL\b/i.test(definition),
+    defaultValue: defaultMatch ? defaultMatch[1]!.trim() : null,
+  };
+}
+
+function isAddColumnMigrationAlreadyApplied(
+  database: Database,
+  migration: string
+): boolean {
+  const parsed = parseAddColumnMigration(migration);
+  if (!parsed) return false;
+
+  const column = getColumnInfo(database, parsed.table, parsed.column);
+  if (!column) return false;
+
+  return (
+    column.type.toUpperCase() === parsed.type &&
+    Boolean(column.notnull) === parsed.notNull &&
+    column.dflt_value === parsed.defaultValue
+  );
 }
 
 function runMigrations(database: Database): void {
@@ -155,20 +214,14 @@ function runMigrations(database: Database): void {
 
   for (let i = 0; i < MIGRATIONS.length; i++) {
     if (!appliedSet.has(i)) {
-      if (
-        i === AGENTS_PROJECT_ID_MIGRATION_INDEX &&
-        hasColumn(database, "agents", "project_id")
-      ) {
-        database
-          .query("INSERT INTO _migrations (id, applied_at) VALUES (?, ?)")
-          .run(i, now());
+      const migration = MIGRATIONS[i]!;
+      if (isAddColumnMigrationAlreadyApplied(database, migration)) {
+        markMigrationApplied(database, i);
         continue;
       }
 
-      database.exec(MIGRATIONS[i]!);
-      database
-        .query("INSERT INTO _migrations (id, applied_at) VALUES (?, ?)")
-        .run(i, now());
+      database.exec(migration);
+      markMigrationApplied(database, i);
     }
   }
 }
@@ -177,10 +230,19 @@ export function getDatabase(): Database {
   if (db) return db;
 
   const dbPath = getDbPath();
-  _adapter = new SqliteAdapter(dbPath);
+  const adapter = new SqliteAdapter(dbPath);
+  const database = adapter.raw;
+
+  try {
+    runMigrations(database);
+    ensureFeedbackTable(adapter);
+  } catch (error) {
+    database.close();
+    throw error;
+  }
+
+  _adapter = adapter;
   db = _adapter.raw;
-  runMigrations(db);
-  ensureFeedbackTable(_adapter);
   return db;
 }
 
