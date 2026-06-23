@@ -392,7 +392,7 @@ export async function deployViaGitHub(
   poll: boolean = false,
   maxPollMinutes: number = 45
 ): Promise<GitHubDeployResult> {
-  const allInputs = { environment: input.environment, ...input.inputs };
+  const allInputs = { ...input.inputs, environment: input.environment };
   triggerWorkflow(input.repo, input.workflow, allInputs);
 
   if (!poll) {
