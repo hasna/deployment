@@ -26,6 +26,12 @@ import { DigitalOceanProvider } from "../lib/digitalocean.js";
 import { PACKAGE_DESCRIPTION, PACKAGE_VERSION } from "../lib/package.js";
 import { triggerWorkflow, getLatestRun, getRunStatus, getFailureLogs, isGhAuthenticated } from "../lib/github-actions.js";
 import { runPreDeployChecks } from "../lib/pre-deploy-checks.js";
+import {
+  deployGitHubToolSchema,
+  ghLogsToolSchema,
+  ghStatusToolSchema,
+  ghTriggerToolSchema,
+} from "./github-actions-schemas.js";
 import type { SourceType, ProviderType, EnvironmentType } from "../types/index.js";
 
 function handleProcessFlags(argv: readonly string[]): void {
@@ -518,13 +524,7 @@ server.tool("deploy_sequence", "Deploy to multiple environments sequentially", {
   } catch (e) { return err(e); }
 });
 
-server.tool("deploy_github", "Deploy via GitHub Actions workflow_dispatch", {
-  repo: z.string().describe("GitHub repo (owner/name)"),
-  workflow: z.string().describe("Workflow filename (e.g. deploy.yml)"),
-  environment: z.string().describe("Target environment"),
-  inputs: z.record(z.string()).optional().describe("Additional workflow inputs"),
-  poll: z.boolean().optional().describe("Wait for completion (default: false)"),
-}, async (params) => {
+server.tool("deploy_github", "Deploy via GitHub Actions workflow_dispatch", deployGitHubToolSchema, async (params) => {
   try {
     return ok(await deployViaGitHub(
       { repo: params.repo, workflow: params.workflow, environment: params.environment, inputs: params.inputs },
@@ -535,11 +535,7 @@ server.tool("deploy_github", "Deploy via GitHub Actions workflow_dispatch", {
 
 // ── GitHub Actions Tools ────────────────────────────────────────────────────
 
-server.tool("gh_trigger", "Trigger a GitHub Actions workflow", {
-  repo: z.string().describe("GitHub repo (owner/name)"),
-  workflow: z.string().describe("Workflow filename (e.g. deploy.yml)"),
-  inputs: z.record(z.string()).optional().describe("Workflow dispatch inputs"),
-}, async (params) => {
+server.tool("gh_trigger", "Trigger a GitHub Actions workflow", ghTriggerToolSchema, async (params) => {
   try {
     if (!isGhAuthenticated()) {
       return err(new Error("GitHub CLI not authenticated. Run: gh auth login"));
@@ -548,12 +544,7 @@ server.tool("gh_trigger", "Trigger a GitHub Actions workflow", {
   } catch (e) { return err(e); }
 });
 
-server.tool("gh_status", "Get GitHub Actions workflow run status", {
-  repo: z.string().describe("GitHub repo (owner/name)"),
-  workflow: z.string().optional().describe("Workflow filename (e.g. deploy.yml)"),
-  run_id: z.number().optional().describe("Specific run ID to check"),
-  limit: z.number().optional().describe("Number of recent runs (default: 3)"),
-}, async (params) => {
+server.tool("gh_status", "Get GitHub Actions workflow run status", ghStatusToolSchema, async (params) => {
   try {
     if (params.run_id) {
       return ok(getRunStatus(params.repo, params.run_id));
@@ -565,11 +556,7 @@ server.tool("gh_status", "Get GitHub Actions workflow run status", {
   } catch (e) { return err(e); }
 });
 
-server.tool("gh_logs", "Get failure logs from a GitHub Actions run", {
-  repo: z.string().describe("GitHub repo (owner/name)"),
-  run_id: z.number().describe("Workflow run ID"),
-  lines: z.number().optional().describe("Number of log lines (default: 30)"),
-}, async (params) => {
+server.tool("gh_logs", "Get failure logs from a GitHub Actions run", ghLogsToolSchema, async (params) => {
   try {
     return ok({ logs: getFailureLogs(params.repo, params.run_id, params.lines ?? 30) });
   } catch (e) { return err(e); }
