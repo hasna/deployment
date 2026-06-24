@@ -5,7 +5,7 @@ import chalk from "chalk";
 import { createProject, getProject, listProjects, deleteProject } from "../db/projects.js";
 import { createEnvironment, getEnvironment, listEnvironments, deleteEnvironment } from "../db/environments.js";
 import { createProvider, getProvider as getDbProvider, listProviders, deleteProvider } from "../db/providers.js";
-import { listDeployments, getDeployment } from "../db/deployments.js";
+import { countDeployments, listDeployments, getDeployment } from "../db/deployments.js";
 import { listResources, deleteResource } from "../db/resources.js";
 import { listBlueprints, getBlueprint } from "../db/blueprints.js";
 import { registerAgent, listAgents } from "../db/agents.js";
@@ -24,6 +24,7 @@ import { RailwayProvider } from "../lib/railway.js";
 import { FlyioProvider } from "../lib/flyio.js";
 import { AwsProvider } from "../lib/aws.js";
 import { DigitalOceanProvider } from "../lib/digitalocean.js";
+import { pageItems, parseCursor, parsePositiveInt, summarizeObject, tailLines, truncateText } from "../lib/compact-output.js";
 import { PACKAGE_VERSION } from "../lib/package.js";
 import type { SourceType, ProviderType, EnvironmentType } from "../types/index.js";
 
@@ -71,6 +72,37 @@ function printJson(data: unknown): void {
   console.log(JSON.stringify(data, null, 2));
 }
 
+interface ListOutputOptions {
+  format?: string;
+  limit?: string;
+  cursor?: string;
+  verbose?: boolean;
+}
+
+function isJsonFormat(format?: string): boolean {
+  return format === "json";
+}
+
+function printPageHint(noun: string, page: { items: readonly unknown[]; total: number; nextCursor: number | null }, command: string, detailHint?: string): void {
+  if (page.total <= page.items.length && !detailHint) return;
+  const parts: string[] = [];
+  if (page.total > page.items.length) {
+    parts.push(`showing ${page.items.length} of ${page.total}`);
+    if (page.nextCursor !== null) parts.push(`next: ${command} --cursor ${page.nextCursor}`);
+  }
+  if (detailHint) parts.push(detailHint);
+  console.log(chalk.dim(`  ${noun}: ${parts.join("; ")}`));
+}
+
+function compactSource(type: string, url: string, verbose?: boolean): string {
+  const source = `${type}:${url || "none"}`;
+  return verbose ? source : truncateText(source, 64);
+}
+
+function compactUrl(url: string, verbose?: boolean): string {
+  return verbose ? url : truncateText(url, 48);
+}
+
 const program = new Command()
   .name("deployment")
   .description("General-purpose deployment orchestration for AI agents")
@@ -103,14 +135,24 @@ projectCmd
   .alias("ls")
   .description("List all projects")
   .option("-f, --format <fmt>", "Output format: table|json", "table")
-  .action((opts: { format: string }) => {
-    const projects = listProjects();
-    if (opts.format === "json") return printJson(projects);
-    if (projects.length === 0) return console.log(chalk.dim("No projects"));
-    console.log(chalk.bold("Projects:"));
-    for (const p of projects) {
-      console.log(`  ${chalk.cyan(shortId(p.id))} ${chalk.bold(p.name)} ${chalk.dim(p.source_type + ":" + p.source_url)} ${chalk.dim(timeAgo(p.created_at))}`);
+  .option("-s, --search <query>", "Search project name or description")
+  .option("-n, --limit <n>", "Max rows to print (default: 20)")
+  .option("--cursor <offset>", "Pagination cursor from previous output")
+  .option("--verbose", "Show longer fields")
+  .action((opts: ListOutputOptions & { search?: string }) => {
+    const projects = listProjects({ search: opts.search });
+    if (isJsonFormat(opts.format)) {
+      const limit = opts.limit ? parsePositiveInt(opts.limit, projects.length || 1) : projects.length;
+      const page = pageItems(projects, { limit, cursor: opts.cursor, defaultLimit: projects.length || 1 });
+      return printJson(page.items);
     }
+    if (projects.length === 0) return console.log(chalk.dim("No projects"));
+    const page = pageItems(projects, opts);
+    console.log(chalk.bold("Projects:"));
+    for (const p of page.items) {
+      console.log(`  ${chalk.cyan(shortId(p.id))} ${chalk.bold(truncateText(p.name, 32))} ${chalk.dim(compactSource(p.source_type, p.source_url, opts.verbose))} ${chalk.dim(timeAgo(p.created_at))}`);
+    }
+    printPageHint("projects", page, "deployment project list", "use project show <id> for details");
   });
 
 projectCmd
@@ -168,32 +210,45 @@ envCmd
   .alias("ls")
   .description("List environments")
   .option("-f, --format <fmt>", "Output format: table|json", "table")
-  .action((projectName: string | undefined, opts: { format: string }) => {
+  .option("-t, --type <type>", "Filter by type: dev|staging|prod")
+  .option("-n, --limit <n>", "Max rows to print (default: 20)")
+  .option("--cursor <offset>", "Pagination cursor from previous output")
+  .action((projectName: string | undefined, opts: ListOutputOptions & { type?: string }) => {
     try {
       let projectId: string | undefined;
       if (projectName) projectId = getProject(projectName).id;
-      const envs = listEnvironments({ project_id: projectId });
-      if (opts.format === "json") return printJson(envs);
+      const envs = listEnvironments({ project_id: projectId, type: opts.type as EnvironmentType | undefined });
+      if (isJsonFormat(opts.format)) {
+        const limit = opts.limit ? parsePositiveInt(opts.limit, envs.length || 1) : envs.length;
+        const page = pageItems(envs, { limit, cursor: opts.cursor, defaultLimit: envs.length || 1 });
+        return printJson(page.items);
+      }
       if (envs.length === 0) return console.log(chalk.dim("No environments"));
+      const page = pageItems(envs, opts);
       console.log(chalk.bold("Environments:"));
-      for (const e of envs) {
+      for (const e of page.items) {
         console.log(`  ${chalk.cyan(shortId(e.id))} ${chalk.bold(e.name)} ${statusColor(e.type)} ${chalk.dim(e.region || "")} ${chalk.dim(timeAgo(e.created_at))}`);
       }
+      printPageHint("environments", page, "deployment env list", "use env show <id> for details");
     } catch (e) { handleError(e); }
   });
 
 envCmd
   .command("show <id>")
   .description("Show environment details")
-  .action((id: string) => {
+  .option("-f, --format <fmt>", "Output format: table|json", "table")
+  .option("--verbose", "Show full config")
+  .action((id: string, opts: { format: string; verbose?: boolean }) => {
     try {
       const e = getEnvironment(id);
+      if (isJsonFormat(opts.format)) return printJson(e);
       console.log(chalk.bold("Environment: ") + e.name);
       console.log(chalk.cyan("  ID:       ") + e.id);
       console.log(chalk.cyan("  Type:     ") + e.type);
       console.log(chalk.cyan("  Provider: ") + e.provider_id);
       console.log(chalk.cyan("  Region:   ") + (e.region || chalk.dim("default")));
-      console.log(chalk.cyan("  Config:   ") + JSON.stringify(e.config));
+      console.log(chalk.cyan("  Config:   ") + (opts.verbose ? JSON.stringify(e.config, null, 2) : summarizeObject(e.config)));
+      if (!opts.verbose && Object.keys(e.config).length > 0) console.log(chalk.dim("  use --verbose or --format json for full config"));
     } catch (e) { handleError(e); }
   });
 
@@ -233,14 +288,23 @@ providerCmd
   .alias("ls")
   .description("List providers")
   .option("-f, --format <fmt>", "Output format: table|json", "table")
-  .action((opts: { format: string }) => {
-    const providers = listProviders();
-    if (opts.format === "json") return printJson(providers);
+  .option("-t, --type <type>", "Filter by provider type")
+  .option("-n, --limit <n>", "Max rows to print (default: 20)")
+  .option("--cursor <offset>", "Pagination cursor from previous output")
+  .action((opts: ListOutputOptions & { type?: string }) => {
+    const providers = listProviders({ type: opts.type as ProviderType | undefined });
+    if (isJsonFormat(opts.format)) {
+      const limit = opts.limit ? parsePositiveInt(opts.limit, providers.length || 1) : providers.length;
+      const page = pageItems(providers, { limit, cursor: opts.cursor, defaultLimit: providers.length || 1 });
+      return printJson(page.items);
+    }
     if (providers.length === 0) return console.log(chalk.dim("No providers"));
+    const page = pageItems(providers, opts);
     console.log(chalk.bold("Providers:"));
-    for (const p of providers) {
+    for (const p of page.items) {
       console.log(`  ${chalk.cyan(shortId(p.id))} ${chalk.bold(p.name)} ${chalk.magenta(p.type)} ${chalk.dim(timeAgo(p.created_at))}`);
     }
+    printPageHint("providers", page, "deployment provider list", "use provider show <id> for details");
   });
 
 providerCmd
@@ -360,7 +424,8 @@ program
 program
   .command("status <project> <environment>")
   .description("Show deployment status")
-  .action(async (projectName: string, envName: string) => {
+  .option("--verbose", "Show full URL and version")
+  .action(async (projectName: string, envName: string, opts: { verbose?: boolean }) => {
     try {
       const project = getProject(projectName);
       const envs = listEnvironments({ project_id: project.id });
@@ -373,10 +438,13 @@ program
       console.log(chalk.bold("Deployment Status:"));
       console.log(chalk.cyan("  ID:       ") + shortId(deployment.id));
       console.log(chalk.cyan("  Status:   ") + statusColor(deployment.status));
-      console.log(chalk.cyan("  URL:      ") + (deployment.url || chalk.dim("none")));
-      console.log(chalk.cyan("  Version:  ") + (deployment.version || chalk.dim("none")));
+      console.log(chalk.cyan("  URL:      ") + (deployment.url ? compactUrl(deployment.url, opts.verbose) : chalk.dim("none")));
+      console.log(chalk.cyan("  Version:  ") + (deployment.version ? (opts.verbose ? deployment.version : truncateText(deployment.version, 48)) : chalk.dim("none")));
       if (providerStatus) {
         console.log(chalk.cyan("  Provider: ") + statusColor(providerStatus));
+      }
+      if (!opts.verbose && (deployment.url.length > 48 || deployment.version.length > 48)) {
+        console.log(chalk.dim("  use --verbose for full URL and version"));
       }
     } catch (e) { handleError(e); }
   });
@@ -386,7 +454,9 @@ program
 program
   .command("logs <project> <environment>")
   .description("Get deployment logs")
-  .action(async (projectName: string, envName: string) => {
+  .option("--lines <n>", "Tail the last N lines (default: 120)")
+  .option("--full", "Print full logs")
+  .action(async (projectName: string, envName: string, opts: { lines?: string; full?: boolean }) => {
     try {
       const project = getProject(projectName);
       const envs = listEnvironments({ project_id: project.id });
@@ -394,7 +464,11 @@ program
       if (!env) return handleError(new Error(`Environment "${envName}" not found`));
 
       const logs = await getLogs(project.id, env.id);
-      console.log(logs || chalk.dim("No logs available"));
+      if (!logs) return console.log(chalk.dim("No logs available"));
+      if (opts.full) return console.log(logs);
+      const tailed = tailLines(logs, parsePositiveInt(opts.lines, 120, 10_000));
+      console.log(tailed.text);
+      if (tailed.omitted > 0) console.log(chalk.dim(`  omitted ${tailed.omitted} earlier line(s); use --full or --lines <n>`));
     } catch (e) { handleError(e); }
   });
 
@@ -446,14 +520,24 @@ resourceCmd
   .alias("ls")
   .description("List resources")
   .option("-f, --format <fmt>", "Output format: table|json", "table")
-  .action((envId: string | undefined, opts: { format: string }) => {
-    const resources = listResources({ environment_id: envId });
-    if (opts.format === "json") return printJson(resources);
+  .option("-t, --type <type>", "Filter by resource type")
+  .option("-s, --status <status>", "Filter by status")
+  .option("-n, --limit <n>", "Max rows to print (default: 20)")
+  .option("--cursor <offset>", "Pagination cursor from previous output")
+  .action((envId: string | undefined, opts: ListOutputOptions & { type?: string; status?: string }) => {
+    const resources = listResources({ environment_id: envId, type: opts.type as any, status: opts.status as any });
+    if (isJsonFormat(opts.format)) {
+      const limit = opts.limit ? parsePositiveInt(opts.limit, resources.length || 1) : resources.length;
+      const page = pageItems(resources, { limit, cursor: opts.cursor, defaultLimit: resources.length || 1 });
+      return printJson(page.items);
+    }
     if (resources.length === 0) return console.log(chalk.dim("No resources"));
+    const page = pageItems(resources, opts);
     console.log(chalk.bold("Resources:"));
-    for (const r of resources) {
+    for (const r of page.items) {
       console.log(`  ${chalk.cyan(shortId(r.id))} ${chalk.bold(r.name)} ${chalk.magenta(r.type)} ${statusColor(r.status)}`);
     }
+    printPageHint("resources", page, "deployment resource list", "use --format json for full resource configs");
   });
 
 resourceCmd
@@ -475,27 +559,44 @@ blueprintCmd
   .alias("ls")
   .description("List available blueprints")
   .option("-f, --format <fmt>", "Output format: table|json", "table")
-  .action((opts: { format: string }) => {
+  .option("-p, --provider <type>", "Filter by provider type")
+  .option("-n, --limit <n>", "Max rows to print (default: 20)")
+  .option("--cursor <offset>", "Pagination cursor from previous output")
+  .action((opts: ListOutputOptions & { provider?: string }) => {
     seedBuiltinBlueprints();
-    const blueprints = listBlueprints();
-    if (opts.format === "json") return printJson(blueprints);
-    if (blueprints.length === 0) return console.log(chalk.dim("No blueprints"));
-    console.log(chalk.bold("Blueprints:"));
-    for (const b of blueprints) {
-      console.log(`  ${chalk.cyan(shortId(b.id))} ${chalk.bold(b.name)} ${chalk.magenta(b.provider_type)} ${chalk.dim(b.description)}`);
+    const blueprints = listBlueprints({ provider_type: opts.provider as ProviderType | undefined });
+    if (isJsonFormat(opts.format)) {
+      const limit = opts.limit ? parsePositiveInt(opts.limit, blueprints.length || 1) : blueprints.length;
+      const page = pageItems(blueprints, { limit, cursor: opts.cursor, defaultLimit: blueprints.length || 1 });
+      return printJson(page.items);
     }
+    if (blueprints.length === 0) return console.log(chalk.dim("No blueprints"));
+    const page = pageItems(blueprints, opts);
+    console.log(chalk.bold("Blueprints:"));
+    for (const b of page.items) {
+      console.log(`  ${chalk.cyan(shortId(b.id))} ${chalk.bold(b.name)} ${chalk.magenta(b.provider_type)} ${chalk.dim(truncateText(b.description, 72))}`);
+    }
+    printPageHint("blueprints", page, "deployment blueprint list", "use blueprint show <id> --verbose for template details");
   });
 
 blueprintCmd
   .command("show <id>")
   .description("Show blueprint details")
-  .action((id: string) => {
+  .option("-f, --format <fmt>", "Output format: table|json", "table")
+  .option("--verbose", "Show full template")
+  .action((id: string, opts: { format: string; verbose?: boolean }) => {
     try {
       const b = getBlueprint(id);
+      if (isJsonFormat(opts.format)) return printJson(b);
       console.log(chalk.bold("Blueprint: ") + b.name);
       console.log(chalk.cyan("  Provider: ") + b.provider_type);
       console.log(chalk.cyan("  Desc:     ") + b.description);
-      console.log(chalk.cyan("  Template: ") + JSON.stringify(b.template, null, 2));
+      if (opts.verbose) {
+        console.log(chalk.cyan("  Template: ") + JSON.stringify(b.template, null, 2));
+      } else {
+        console.log(chalk.cyan("  Template: ") + `${b.template.resources.length} resource(s), ${Object.keys(b.template.env_vars).length} env var(s), ${Object.keys(b.template.deploy_config).length} deploy key(s)`);
+        console.log(chalk.dim("  use --verbose or --format json for the full template"));
+      }
     } catch (e) { handleError(e); }
   });
 
@@ -535,13 +636,17 @@ agentCmd
   .command("list")
   .alias("ls")
   .description("List agents")
-  .action(() => {
+  .option("-n, --limit <n>", "Max rows to print (default: 20)")
+  .option("--cursor <offset>", "Pagination cursor from previous output")
+  .action((opts: ListOutputOptions) => {
     const agents = listAgents();
     if (agents.length === 0) return console.log(chalk.dim("No agents"));
+    const page = pageItems(agents, opts);
     console.log(chalk.bold("Agents:"));
-    for (const a of agents) {
+    for (const a of page.items) {
       console.log(`  ${chalk.cyan(shortId(a.id))} ${chalk.bold(a.name)} ${chalk.dim(a.type)} ${chalk.dim(timeAgo(a.last_seen))}`);
     }
+    printPageHint("agents", page, "deployment agent list");
   });
 
 // ── Secret Commands ─────────────────────────────────────────────────────────
@@ -563,15 +668,19 @@ secretCmd
   .command("list <project> [env]")
   .alias("ls")
   .description("List deployment secrets")
-  .action(async (project: string, env?: string) => {
+  .option("-n, --limit <n>", "Max rows to print (default: 20)")
+  .option("--cursor <offset>", "Pagination cursor from previous output")
+  .action(async (project: string, env: string | undefined, opts: ListOutputOptions) => {
     try {
       await initSecrets();
       const secrets = listDeploymentSecrets(project, env);
       if (secrets.length === 0) return console.log(chalk.dim("No secrets"));
+      const page = pageItems(secrets, opts);
       console.log(chalk.bold("Secrets:"));
-      for (const s of secrets) {
+      for (const s of page.items) {
         console.log(`  ${chalk.cyan(s.key)} ${chalk.dim("***")}`);
       }
+      printPageHint("secrets", page, `deployment secret list ${project}${env ? ` ${env}` : ""}`);
     } catch (e) { handleError(e); }
   });
 
@@ -586,37 +695,54 @@ historyCmd
   .option("-e, --env <env>", "Filter by environment ID")
   .option("-s, --status <status>", "Filter by status")
   .option("-n, --limit <n>", "Limit results", "20")
+  .option("--cursor <offset>", "Pagination cursor from previous output")
   .option("-f, --format <fmt>", "Output format: table|json", "table")
-  .action((projectName: string | undefined, opts: { env?: string; status?: string; limit: string; format: string }) => {
+  .action((projectName: string | undefined, opts: ListOutputOptions & { env?: string; status?: string }) => {
     try {
       let projectId: string | undefined;
       if (projectName) projectId = getProject(projectName).id;
 
-      const deployments = listDeployments({
+      const filters = {
         project_id: projectId,
         environment_id: opts.env,
         status: opts.status as any,
-        limit: parseInt(opts.limit, 10),
-      });
+      };
+      const limit = parsePositiveInt(opts.limit, 20, 200);
+      const cursor = parseCursor(opts.cursor);
+      const total = countDeployments(filters);
+      const deployments = listDeployments({ ...filters, limit, offset: cursor });
 
-      if (opts.format === "json") return printJson(deployments);
-      if (deployments.length === 0) return console.log(chalk.dim("No deployments"));
+      if (isJsonFormat(opts.format)) {
+        return printJson(deployments);
+      }
+      if (total === 0) return console.log(chalk.dim("No deployments"));
 
+      const page = {
+        items: deployments,
+        total,
+        nextCursor: cursor + deployments.length < total ? cursor + deployments.length : null,
+      };
       console.log(chalk.bold("Deployments:"));
-      for (const d of deployments) {
+      for (const d of page.items) {
         console.log(
-          `  ${chalk.cyan(shortId(d.id))} ${statusColor(d.status)} ${chalk.dim(d.version || "no version")} ${chalk.dim(d.url || "")} ${chalk.dim(timeAgo(d.created_at))}`
+          `  ${chalk.cyan(shortId(d.id))} ${statusColor(d.status)} ${chalk.dim(truncateText(d.version || "no version", 28))} ${chalk.dim(compactUrl(d.url || "", opts.verbose))} ${chalk.dim(timeAgo(d.created_at))}`
         );
       }
+      printPageHint("deployments", page, "deployment history list", "use history show <id> for details");
     } catch (e) { handleError(e); }
   });
 
 historyCmd
   .command("show <id>")
   .description("Show deployment details")
-  .action((id: string) => {
+  .option("-f, --format <fmt>", "Output format: table|json", "table")
+  .option("--verbose", "Show full logs")
+  .option("--logs", "Show recent logs")
+  .option("--log-lines <n>", "Recent log lines to show with --logs (default: 40)")
+  .action((id: string, opts: { format: string; verbose?: boolean; logs?: boolean; logLines?: string }) => {
     try {
       const d = getDeployment(id);
+      if (isJsonFormat(opts.format)) return printJson(d);
       console.log(chalk.bold("Deployment: ") + shortId(d.id));
       console.log(chalk.cyan("  Status:    ") + statusColor(d.status));
       console.log(chalk.cyan("  URL:       ") + (d.url || chalk.dim("none")));
@@ -625,7 +751,15 @@ historyCmd
       console.log(chalk.cyan("  Commit:    ") + (d.commit_sha || chalk.dim("none")));
       console.log(chalk.cyan("  Started:   ") + (d.started_at || chalk.dim("none")));
       console.log(chalk.cyan("  Completed: ") + (d.completed_at || chalk.dim("none")));
-      if (d.logs) console.log(chalk.cyan("  Logs:\n") + d.logs);
+      if (d.logs && opts.verbose) {
+        console.log(chalk.cyan("  Logs:\n") + d.logs);
+      } else if (d.logs && opts.logs) {
+        const tailed = tailLines(d.logs, parsePositiveInt(opts.logLines, 40, 10_000));
+        console.log(chalk.cyan("  Logs:\n") + tailed.text);
+        if (tailed.omitted > 0) console.log(chalk.dim(`  omitted ${tailed.omitted} earlier line(s); use --verbose for full logs`));
+      } else if (d.logs) {
+        console.log(chalk.dim("  Logs omitted; use --logs, --verbose, or --format json"));
+      }
     } catch (e) { handleError(e); }
   });
 
@@ -655,7 +789,8 @@ program
   .command("init")
   .description("Interactive setup wizard — detect project type and create config")
   .option("-y, --yes", "Non-interactive mode with defaults")
-  .action(async (opts: { yes?: boolean }) => {
+  .option("--verbose", "Show all detected files")
+  .action(async (opts: { yes?: boolean; verbose?: boolean }) => {
     try {
       const cwd = process.cwd();
       console.log(chalk.bold("Detecting project type..."));
@@ -667,7 +802,11 @@ program
       console.log(chalk.cyan("  Blueprint:  ") + detection.suggestedBlueprint);
       console.log(chalk.cyan("  Confidence: ") + detection.confidence);
       if (detection.detectedFiles.length > 0) {
-        console.log(chalk.cyan("  Files:      ") + detection.detectedFiles.join(", "));
+        const files = opts.verbose ? detection.detectedFiles : detection.detectedFiles.slice(0, 8);
+        console.log(chalk.cyan("  Files:      ") + files.map((file) => opts.verbose ? file : truncateText(file, 36)).join(", "));
+        if (!opts.verbose && detection.detectedFiles.length > files.length) {
+          console.log(chalk.dim(`  omitted ${detection.detectedFiles.length - files.length} detected file(s); use --verbose for all files`));
+        }
       }
 
       const projectName = cwd.split("/").pop() ?? "my-project";
@@ -744,11 +883,41 @@ program
 program
   .command("overview")
   .description("Show all projects, environments, and latest deployments")
-  .action(() => {
+  .option("-n, --limit <n>", "Max environment rows to print (default: 20)")
+  .option("--cursor <offset>", "Pagination cursor from previous output")
+  .option("--verbose", "Show longer URLs and names")
+  .action((opts: ListOutputOptions) => {
     try {
       const projects = listProjects();
       if (projects.length === 0) return console.log(chalk.dim("No projects"));
 
+      const rows: Array<{ project: string; env: string; provider: string; status: string; url: string; lastDeploy: string }> = [];
+      for (const p of projects) {
+        const envs = listEnvironments({ project_id: p.id });
+        if (envs.length === 0) {
+          rows.push({ project: p.name, env: "no environments", provider: "", status: "—", url: "", lastDeploy: "—" });
+          continue;
+        }
+        for (const env of envs) {
+          let providerName = "";
+          try {
+            const prov = getDbProvider(env.provider_id);
+            providerName = prov.type;
+          } catch { providerName = "?"; }
+
+          const latest = getLatestDeployment(env.id);
+          rows.push({
+            project: p.name,
+            env: env.name,
+            provider: providerName,
+            status: latest ? latest.status : "—",
+            url: latest?.url || "",
+            lastDeploy: latest ? timeAgo(latest.created_at) : "—",
+          });
+        }
+      }
+
+      const page = pageItems(rows, opts);
       console.log(chalk.bold("Overview:\n"));
       console.log(
         chalk.dim("  Project".padEnd(20)) +
@@ -760,34 +929,20 @@ program
       );
       console.log(chalk.dim("  " + "─".repeat(110)));
 
-      for (const p of projects) {
-        const envs = listEnvironments({ project_id: p.id });
-        if (envs.length === 0) {
-          console.log(`  ${chalk.bold(p.name.padEnd(19))} ${chalk.dim("no environments")}`);
-          continue;
-        }
-        for (const env of envs) {
-          let providerName = "";
-          try {
-            const prov = getDbProvider(env.provider_id);
-            providerName = prov.type;
-          } catch { providerName = "?"; }
-
-          const latest = getLatestDeployment(env.id);
-          const status = latest ? latest.status : "—";
-          const url = latest?.url || "";
-          const lastDeploy = latest ? timeAgo(latest.created_at) : "—";
-
-          console.log(
-            `  ${chalk.bold(p.name.slice(0, 18).padEnd(19))} ` +
-            `${chalk.bold(env.name.slice(0, 13).padEnd(14))} ` +
-            `${chalk.magenta(providerName.padEnd(14))} ` +
-            `${statusColor(status).padEnd(14 + (statusColor(status).length - status.length))} ` +
-            `${chalk.dim(url.slice(0, 33).padEnd(34))} ` +
-            `${chalk.dim(lastDeploy)}`
-          );
-        }
+      for (const row of page.items) {
+        const projectName = opts.verbose ? row.project : truncateText(row.project, 18);
+        const envName = opts.verbose ? row.env : truncateText(row.env, 13);
+        const url = opts.verbose ? row.url : truncateText(row.url, 33);
+        console.log(
+          `  ${chalk.bold(projectName.padEnd(19))} ` +
+          `${chalk.bold(envName.padEnd(14))} ` +
+          `${chalk.magenta(row.provider.padEnd(14))} ` +
+          `${statusColor(row.status).padEnd(14 + (statusColor(row.status).length - row.status.length))} ` +
+          `${chalk.dim(url.padEnd(34))} ` +
+          `${chalk.dim(row.lastDeploy)}`
+        );
       }
+      printPageHint("overview", page, "deployment overview", "use --verbose for longer fields");
     } catch (e) { handleError(e); }
   });
 
@@ -844,18 +999,23 @@ hookCmd
   .alias("ls")
   .description("List all hooks")
   .option("-e, --event <event>", "Filter by event")
-  .action((opts: { event?: string }) => {
+  .option("-n, --limit <n>", "Max rows to print (default: 20)")
+  .option("--cursor <offset>", "Pagination cursor from previous output")
+  .option("--verbose", "Show longer hook commands")
+  .action((opts: ListOutputOptions & { event?: string }) => {
     try {
       ensureHooksTable();
       const hooks = listHooks(opts.event as DeploymentHookEvent | undefined);
       if (hooks.length === 0) return console.log(chalk.dim("No hooks"));
+      const page = pageItems(hooks, opts);
       console.log(chalk.bold("Hooks:"));
-      for (const h of hooks) {
+      for (const h of page.items) {
         console.log(
-          `  ${chalk.cyan(shortId(h.id))} ${chalk.magenta(h.event)} ${chalk.bold(h.command)} ` +
+          `  ${chalk.cyan(shortId(h.id))} ${chalk.magenta(h.event)} ${chalk.bold(opts.verbose ? h.command : truncateText(h.command, 56))} ` +
           `${h.enabled ? chalk.green("enabled") : chalk.red("disabled")} ${chalk.dim(timeAgo(h.created_at))}`
         );
       }
+      printPageHint("hooks", page, "deployment hook list", "use --verbose for full commands");
     } catch (e) { handleError(e); }
   });
 
@@ -867,7 +1027,7 @@ hookCmd
   .action((event: string, command: string, opts: { project?: string; env?: string }) => {
     try {
       const hook = addHook(event as DeploymentHookEvent, command, opts.project, opts.env);
-      console.log(chalk.green("✓ Hook added: ") + chalk.bold(hook.event) + " → " + chalk.cyan(hook.command));
+      console.log(chalk.green("✓ Hook added: ") + chalk.bold(hook.event) + " → " + chalk.cyan(truncateText(hook.command, 96)));
     } catch (e) { handleError(e); }
   });
 
@@ -900,9 +1060,9 @@ hookCmd
       });
       for (const r of results) {
         if (r.success) {
-          console.log(chalk.green("  ✓ ") + r.command + chalk.dim(` (${r.duration_ms}ms)`));
+          console.log(chalk.green("  ✓ ") + truncateText(r.command, 72) + chalk.dim(` (${r.duration_ms}ms)`));
         } else {
-          console.log(chalk.red("  ✗ ") + r.command + chalk.dim(` — ${r.error}`));
+          console.log(chalk.red("  ✗ ") + truncateText(r.command, 72) + chalk.dim(` — ${truncateText(r.error, 120)}`));
         }
       }
     } catch (e) { handleError(e); }
@@ -914,32 +1074,54 @@ program
   .command("ls")
   .description("Alias for project list")
   .option("-f, --format <fmt>", "Output format: table|json", "table")
-  .action((opts: { format: string }) => {
+  .option("-n, --limit <n>", "Max rows to print (default: 20)")
+  .option("--cursor <offset>", "Pagination cursor from previous output")
+  .option("--verbose", "Show longer fields")
+  .action((opts: ListOutputOptions) => {
     const projects = listProjects();
-    if (opts.format === "json") return printJson(projects);
-    if (projects.length === 0) return console.log(chalk.dim("No projects"));
-    console.log(chalk.bold("Projects:"));
-    for (const p of projects) {
-      console.log(`  ${chalk.cyan(shortId(p.id))} ${chalk.bold(p.name)} ${chalk.dim(p.source_type + ":" + p.source_url)} ${chalk.dim(timeAgo(p.created_at))}`);
+    if (isJsonFormat(opts.format)) {
+      const limit = opts.limit ? parsePositiveInt(opts.limit, projects.length || 1) : projects.length;
+      const page = pageItems(projects, { limit, cursor: opts.cursor, defaultLimit: projects.length || 1 });
+      return printJson(page.items);
     }
+    if (projects.length === 0) return console.log(chalk.dim("No projects"));
+    const page = pageItems(projects, opts);
+    console.log(chalk.bold("Projects:"));
+    for (const p of page.items) {
+      console.log(`  ${chalk.cyan(shortId(p.id))} ${chalk.bold(truncateText(p.name, 32))} ${chalk.dim(compactSource(p.source_type, p.source_url, opts.verbose))} ${chalk.dim(timeAgo(p.created_at))}`);
+    }
+    printPageHint("projects", page, "deployment ls", "use project show <id> for details");
   });
 
 program
   .command("ps")
   .description("Alias for history list")
   .option("-n, --limit <n>", "Limit results", "20")
+  .option("--cursor <offset>", "Pagination cursor from previous output")
   .option("-f, --format <fmt>", "Output format: table|json", "table")
-  .action((opts: { limit: string; format: string }) => {
+  .option("--verbose", "Show longer URLs and versions")
+  .action((opts: ListOutputOptions) => {
     try {
-      const deployments = listDeployments({ limit: parseInt(opts.limit, 10) });
-      if (opts.format === "json") return printJson(deployments);
-      if (deployments.length === 0) return console.log(chalk.dim("No deployments"));
+      const limit = parsePositiveInt(opts.limit, 20, 200);
+      const cursor = parseCursor(opts.cursor);
+      const total = countDeployments();
+      const deployments = listDeployments({ limit, offset: cursor });
+      if (isJsonFormat(opts.format)) {
+        return printJson(deployments);
+      }
+      if (total === 0) return console.log(chalk.dim("No deployments"));
+      const page = {
+        items: deployments,
+        total,
+        nextCursor: cursor + deployments.length < total ? cursor + deployments.length : null,
+      };
       console.log(chalk.bold("Deployments:"));
-      for (const d of deployments) {
+      for (const d of page.items) {
         console.log(
-          `  ${chalk.cyan(shortId(d.id))} ${statusColor(d.status)} ${chalk.dim(d.version || "no version")} ${chalk.dim(d.url || "")} ${chalk.dim(timeAgo(d.created_at))}`
+          `  ${chalk.cyan(shortId(d.id))} ${statusColor(d.status)} ${chalk.dim(truncateText(d.version || "no version", 28))} ${chalk.dim(compactUrl(d.url || "", opts.verbose))} ${chalk.dim(timeAgo(d.created_at))}`
         );
       }
+      printPageHint("deployments", page, "deployment ps", "use history show <id> for details");
     } catch (e) { handleError(e); }
   });
 
