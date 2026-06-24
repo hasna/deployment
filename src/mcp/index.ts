@@ -5,7 +5,7 @@ import { z } from "zod";
 import { createProject, getProject, listProjects, deleteProject } from "../db/projects.js";
 import { createEnvironment, getEnvironment, listEnvironments, deleteEnvironment } from "../db/environments.js";
 import { createProvider as createDbProvider, getProvider as getDbProvider, listProviders, deleteProvider } from "../db/providers.js";
-import { listDeployments } from "../db/deployments.js";
+import { countDeployments, listDeployments } from "../db/deployments.js";
 import { listResources, deleteResource } from "../db/resources.js";
 import { listBlueprints, getBlueprint } from "../db/blueprints.js";
 import { registerAgent, listAgents, heartbeat as dbHeartbeat, setFocus as dbSetFocus } from "../db/agents.js";
@@ -23,10 +23,12 @@ import { RailwayProvider } from "../lib/railway.js";
 import { FlyioProvider } from "../lib/flyio.js";
 import { AwsProvider } from "../lib/aws.js";
 import { DigitalOceanProvider } from "../lib/digitalocean.js";
+import { compactJson, pageItems, parseCursor, parsePositiveInt, summarizeObject, tailLines, truncateText } from "../lib/compact-output.js";
 import { PACKAGE_DESCRIPTION, PACKAGE_VERSION } from "../lib/package.js";
 import { triggerWorkflow, getLatestRun, getRunStatus, getFailureLogs, isGhAuthenticated } from "../lib/github-actions.js";
 import { runPreDeployChecks } from "../lib/pre-deploy-checks.js";
-import type { SourceType, ProviderType, EnvironmentType } from "../types/index.js";
+import type { Agent, Blueprint, Deployment, Environment, Project, Provider, ProviderType, Resource, SourceType, EnvironmentType } from "../types/index.js";
+import type { DeploymentHook, HookResult } from "../lib/hooks.js";
 
 function handleProcessFlags(argv: readonly string[]): void {
   if (argv.includes("--help") || argv.includes("-h")) {
@@ -65,12 +67,132 @@ export function buildServer(): McpServer {
 const server = new McpServer({ name: "deployment", version: PACKAGE_VERSION });
 
 function ok(data: unknown) {
-  return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+  return { content: [{ type: "text" as const, text: compactJson(data) }] };
 }
 
 function err(error: unknown) {
   const msg = error instanceof Error ? error.message : String(error);
   return { content: [{ type: "text" as const, text: `Error: ${msg}` }], isError: true as const };
+}
+
+const listToolParams = {
+  limit: z.number().int().positive().max(200).optional().describe("Max rows to return (default: 20)"),
+  cursor: z.number().int().nonnegative().optional().describe("Pagination cursor from previous output"),
+  verbose: z.boolean().optional().describe("Return full objects instead of compact summaries"),
+};
+
+type ListToolParams = { limit?: number; cursor?: number; verbose?: boolean };
+
+function compactToolList<T>(
+  items: readonly T[],
+  params: ListToolParams,
+  summarize: (item: T) => Record<string, unknown>,
+  detailHint: string
+) {
+  const page = pageItems(items, { limit: params.limit, cursor: params.cursor });
+  return {
+    total: page.total,
+    count: page.items.length,
+    limit: page.limit,
+    next_cursor: page.nextCursor,
+    items: params.verbose ? page.items : page.items.map(summarize),
+    hint: params.verbose ? undefined : detailHint,
+  };
+}
+
+function summarizeProject(project: Project): Record<string, unknown> {
+  return {
+    id: project.id,
+    name: truncateText(project.name, 40),
+    source: truncateText(`${project.source_type}:${project.source_url || "none"}`, 80),
+    description: truncateText(project.description, 80),
+    updated_at: project.updated_at,
+  };
+}
+
+function summarizeEnvironment(environment: Environment): Record<string, unknown> {
+  return {
+    id: environment.id,
+    name: truncateText(environment.name, 40),
+    type: environment.type,
+    provider_id: environment.provider_id,
+    region: environment.region || "default",
+    config: summarizeObject(environment.config),
+  };
+}
+
+function summarizeProvider(provider: Provider): Record<string, unknown> {
+  return {
+    id: provider.id,
+    name: truncateText(provider.name, 40),
+    type: provider.type,
+    credentials: provider.credentials_key ? "set" : "unset",
+    config: summarizeObject(provider.config),
+  };
+}
+
+function summarizeDeployment(deployment: Deployment): Record<string, unknown> {
+  return {
+    id: deployment.id,
+    status: deployment.status,
+    version: truncateText(deployment.version || "no version", 40),
+    url: truncateText(deployment.url, 80),
+    created_at: deployment.created_at,
+  };
+}
+
+function summarizeResource(resource: Resource): Record<string, unknown> {
+  return {
+    id: resource.id,
+    name: truncateText(resource.name, 40),
+    type: resource.type,
+    status: resource.status,
+    provider_resource_id: truncateText(resource.provider_resource_id, 40),
+    config: summarizeObject(resource.config),
+  };
+}
+
+function summarizeBlueprint(blueprint: Blueprint): Record<string, unknown> {
+  return {
+    id: blueprint.id,
+    name: truncateText(blueprint.name, 40),
+    provider_type: blueprint.provider_type,
+    description: truncateText(blueprint.description, 80),
+    resources: blueprint.template.resources.length,
+    env_vars: Object.keys(blueprint.template.env_vars).length,
+  };
+}
+
+function summarizeAgent(agent: Agent): Record<string, unknown> {
+  return {
+    id: agent.id,
+    name: truncateText(agent.name, 40),
+    type: agent.type,
+    project_id: agent.project_id,
+    last_seen: agent.last_seen,
+  };
+}
+
+function summarizeHook(hook: DeploymentHook): Record<string, unknown> {
+  return {
+    id: hook.id,
+    event: hook.event,
+    command: truncateText(hook.command, 80),
+    scope: hook.project_id ?? "global",
+    enabled: hook.enabled,
+  };
+}
+
+function summarizeHookResult(result: HookResult): Record<string, unknown> {
+  return {
+    hook_id: result.hook_id,
+    event: result.event,
+    command: truncateText(result.command, 80),
+    success: result.success,
+    output: truncateText(result.output, 160),
+    error: truncateText(result.error, 160),
+    duration_ms: result.duration_ms,
+  };
 }
 
 const TOOL_CATALOG = [
@@ -131,12 +253,27 @@ const TOOL_CATALOG = [
 
 // ── Meta Tools ──────────────────────────────────────────────────────────────
 
-server.tool("describe_tools", "List all available deployment tools", {}, async () => ok(TOOL_CATALOG));
+server.tool("describe_tools", "List all available deployment tools", {
+  ...listToolParams,
+}, async (params) => ok(compactToolList(
+  TOOL_CATALOG,
+  params,
+  (tool) => ({ name: tool.name, description: tool.description }),
+  "use search_tools with a query, limit/cursor for paging, or verbose:true for the full page"
+)));
 
-server.tool("search_tools", "Search tools by keyword", { query: z.string() }, async ({ query }) => {
+server.tool("search_tools", "Search tools by keyword", {
+  query: z.string(),
+  ...listToolParams,
+}, async ({ query, ...params }) => {
   const q = query.toLowerCase();
   const results = TOOL_CATALOG.filter((t) => t.name.includes(q) || t.description.toLowerCase().includes(q));
-  return ok(results);
+  return ok(compactToolList(
+    results,
+    params,
+    (tool) => ({ name: tool.name, description: tool.description }),
+    "use describe_tools, limit/cursor for paging, or verbose:true for the full page"
+  ));
 });
 
 // ── Project Tools ───────────────────────────────────────────────────────────
@@ -160,8 +297,12 @@ server.tool("create_project", "Register a new project", {
 
 server.tool("list_projects", "List all projects", {
   search: z.string().optional().describe("Search filter"),
+  ...listToolParams,
 }, async (params) => {
-  try { return ok(listProjects({ search: params.search })); } catch (e) { return err(e); }
+  try {
+    const projects = listProjects({ search: params.search });
+    return ok(compactToolList(projects, params, summarizeProject, "use get_project with an id/name or verbose:true for full project records"));
+  } catch (e) { return err(e); }
 });
 
 server.tool("get_project", "Get project details", {
@@ -199,8 +340,12 @@ server.tool("create_environment", "Create an environment", {
 server.tool("list_environments", "List environments", {
   project_id: z.string().optional().describe("Filter by project"),
   type: z.enum(["dev", "staging", "prod"]).optional().describe("Filter by type"),
+  ...listToolParams,
 }, async (params) => {
-  try { return ok(listEnvironments(params)); } catch (e) { return err(e); }
+  try {
+    const environments = listEnvironments({ project_id: params.project_id, type: params.type });
+    return ok(compactToolList(environments, params, summarizeEnvironment, "use get_environment with an id or verbose:true for full environment records"));
+  } catch (e) { return err(e); }
 });
 
 server.tool("get_environment", "Get environment details", {
@@ -233,8 +378,12 @@ server.tool("add_provider", "Add a provider account", {
 
 server.tool("list_providers", "List providers", {
   type: z.enum(["vercel", "cloudflare", "railway", "flyio", "aws", "digitalocean"]).optional(),
+  ...listToolParams,
 }, async (params) => {
-  try { return ok(listProviders({ type: params.type as ProviderType })); } catch (e) { return err(e); }
+  try {
+    const providers = listProviders({ type: params.type as ProviderType });
+    return ok(compactToolList(providers, params, summarizeProvider, "use get_provider with an id or verbose:true for full provider records"));
+  } catch (e) { return err(e); }
 });
 
 server.tool("get_provider", "Get provider details", {
@@ -273,25 +422,63 @@ server.tool("deploy", "Deploy a project to an environment", {
 server.tool("get_deployment_status", "Get deployment status", {
   project_id: z.string().describe("Project ID"),
   environment_id: z.string().describe("Environment ID"),
+  verbose: z.boolean().optional().describe("Return the full deployment record, including stored logs"),
 }, async (params) => {
-  try { return ok(await getStatus(params.project_id, params.environment_id)); } catch (e) { return err(e); }
+  try {
+    const status = await getStatus(params.project_id, params.environment_id);
+    if (params.verbose) return ok(status);
+    return ok({
+      deployment: status.deployment ? summarizeDeployment(status.deployment) : null,
+      provider_status: status.providerStatus,
+      hint: status.deployment ? "set verbose:true for the full deployment record or call get_deployment_logs for logs" : undefined,
+    });
+  } catch (e) { return err(e); }
 });
 
 server.tool("list_deployments", "List deployment history", {
   project_id: z.string().optional(),
   environment_id: z.string().optional(),
   status: z.string().optional(),
-  limit: z.number().optional(),
+  ...listToolParams,
 }, async (params) => {
-  try { return ok(listDeployments(params as any)); } catch (e) { return err(e); }
+  try {
+    const filters = {
+      project_id: params.project_id,
+      environment_id: params.environment_id,
+      status: params.status as never,
+    };
+    const limit = parsePositiveInt(params.limit, 20, 200);
+    const cursor = parseCursor(params.cursor);
+    const total = countDeployments(filters);
+    const deployments = listDeployments({ ...filters, limit, offset: cursor });
+    return ok({
+      total,
+      count: deployments.length,
+      limit,
+      next_cursor: cursor + deployments.length < total ? cursor + deployments.length : null,
+      items: params.verbose ? deployments : deployments.map(summarizeDeployment),
+      hint: params.verbose ? undefined : "use get_deployment_status/get_deployment_logs or verbose:true for full deployment records",
+    });
+  } catch (e) { return err(e); }
 });
 
 server.tool("get_deployment_logs", "Get deployment logs", {
   project_id: z.string().describe("Project ID"),
   environment_id: z.string().describe("Environment ID"),
   deployment_id: z.string().optional().describe("Specific deployment ID"),
+  lines: z.number().int().positive().max(10_000).optional().describe("Tail the last N lines (default: 120)"),
+  full: z.boolean().optional().describe("Return full logs instead of a compact tail"),
 }, async (params) => {
-  try { return ok({ logs: await getLogs(params.project_id, params.environment_id, params.deployment_id) }); } catch (e) { return err(e); }
+  try {
+    const logs = await getLogs(params.project_id, params.environment_id, params.deployment_id);
+    if (params.full) return ok({ logs });
+    const tailed = tailLines(logs, parsePositiveInt(params.lines, 120, 10_000));
+    return ok({
+      logs: tailed.text,
+      omitted_lines: tailed.omitted,
+      hint: tailed.omitted > 0 ? "set full:true or a larger lines value for complete logs" : undefined,
+    });
+  } catch (e) { return err(e); }
 });
 
 server.tool("rollback", "Rollback to previous deployment", {
@@ -321,8 +508,17 @@ server.tool("promote", "Promote deployment between environments", {
 server.tool("list_resources", "List provisioned resources", {
   environment_id: z.string().optional(),
   type: z.string().optional(),
+  status: z.string().optional(),
+  ...listToolParams,
 }, async (params) => {
-  try { return ok(listResources(params as any)); } catch (e) { return err(e); }
+  try {
+    const resources = listResources({
+      environment_id: params.environment_id,
+      type: params.type as never,
+      status: params.status as never,
+    });
+    return ok(compactToolList(resources, params, summarizeResource, "use verbose:true for full resource config records"));
+  } catch (e) { return err(e); }
 });
 
 server.tool("destroy_resource", "Destroy a resource", {
@@ -335,8 +531,12 @@ server.tool("destroy_resource", "Destroy a resource", {
 
 server.tool("list_blueprints", "List infrastructure blueprints", {
   provider_type: z.string().optional(),
+  ...listToolParams,
 }, async (params) => {
-  try { return ok(listBlueprints(params as any)); } catch (e) { return err(e); }
+  try {
+    const blueprints = listBlueprints({ provider_type: params.provider_type as ProviderType | undefined });
+    return ok(compactToolList(blueprints, params, summarizeBlueprint, "use get_blueprint with an id or verbose:true for full templates"));
+  } catch (e) { return err(e); }
 });
 
 server.tool("get_blueprint", "Get blueprint details", {
@@ -370,10 +570,23 @@ server.tool("set_secret", "Set a deployment secret", {
 server.tool("list_secrets", "List deployment secrets", {
   project: z.string(),
   environment: z.string().optional(),
+  ...listToolParams,
 }, async (params) => {
   try {
     await initSecrets();
-    return ok(listDeploymentSecrets(params.project, params.environment));
+    const secrets = listDeploymentSecrets(params.project, params.environment);
+    return ok(compactToolList(
+      secrets,
+      params,
+      (secret) => ({
+        key: secret.key,
+        environment: secret.environment,
+        source: secret.source,
+        value: secret.value,
+        rotated: secret.last_rotated || "never",
+      }),
+      "use limit/cursor for paging; secret values remain masked"
+    ));
   } catch (e) { return err(e); }
 });
 
@@ -419,9 +632,22 @@ server.tool("set_config", "Set a non-sensitive config parameter (SSM)", {
 server.tool("list_config", "List config parameters (SSM) for an environment", {
   project: z.string(),
   environment: z.string().optional(),
+  ...listToolParams,
 }, async (params) => {
   try {
-    return ok(listConfigParams(params.project, params.environment));
+    const configs = listConfigParams(params.project, params.environment);
+    return ok(compactToolList(
+      configs,
+      params,
+      (config) => ({
+        key: config.key,
+        environment: config.environment,
+        source: "aws-ssm",
+        aws_arn: truncateText(config.aws_arn, 80),
+        value: truncateText(config.value, 120),
+      }),
+      "use verbose:true for full config parameter records"
+    ));
   } catch (e) { return err(e); }
 });
 
@@ -449,8 +675,9 @@ server.tool("rotate_secret", "Rotate an internal secret with new random value", 
 server.tool("logs_tail", "Tail CloudWatch logs for an ECS service", {
   log_group: z.string().describe("CloudWatch log group name (e.g. /ecs/alumia-dev-web)"),
   filter: z.string().optional().describe("CloudWatch filter pattern"),
-  limit: z.number().optional().describe("Max events to return (default: 50)"),
+  limit: z.number().int().positive().max(200).optional().describe("Max events to return (default: 50, max: 200)"),
   minutes_ago: z.number().optional().describe("Only show logs from last N minutes"),
+  verbose: z.boolean().optional().describe("Return full log messages instead of truncated messages"),
 }, async (params) => {
   try {
     const { AwsProvider } = await import("../lib/aws.js");
@@ -464,15 +691,24 @@ server.tool("logs_tail", "Tail CloudWatch logs for an ECS service", {
     };
     if (creds.sessionToken) connection["session_token"] = creds.sessionToken;
     await provider.connect(connection);
+    const limit = parsePositiveInt(params.limit, 50, 200);
     const startTime = params.minutes_ago
       ? Date.now() - params.minutes_ago * 60 * 1000
       : undefined;
     const logs = await provider.tailLogs(params.log_group, {
       filterPattern: params.filter,
-      limit: params.limit,
+      limit,
       startTime,
     });
-    return ok(logs);
+    return ok({
+      count: logs.length,
+      limit,
+      items: params.verbose ? logs : logs.map((event) => ({
+        timestamp: event.timestamp,
+        message: truncateText(event.message, 240),
+      })),
+      hint: params.verbose ? undefined : "set verbose:true for full log messages",
+    });
   } catch (e) { return err(e); }
 });
 
@@ -600,8 +836,12 @@ server.tool("register_agent", "Register a deployer agent", {
   try { return ok(registerAgent({ name: params.name, type: params.type })); } catch (e) { return err(e); }
 });
 
-server.tool("list_agents", "List all registered agents", {}, async () => {
-  try { return ok(listAgents()); } catch (e) { return err(e); }
+server.tool("list_agents", "List all registered agents", {
+  ...listToolParams,
+}, async (params) => {
+  try {
+    return ok(compactToolList(listAgents(), params, summarizeAgent, "use verbose:true for full agent records"));
+  } catch (e) { return err(e); }
 });
 
 server.tool("heartbeat", "Update last_seen_at to signal agent is active", {
@@ -650,7 +890,9 @@ server.tool("doctor", "System health check", {}, async () => {
 
 // ── Overview Tool ────────────────────────────────────────────────────────
 
-server.tool("overview", "All projects/environments/deployments summary", {}, async () => {
+server.tool("overview", "All projects/environments/deployments summary", {
+  ...listToolParams,
+}, async (params) => {
   try {
     const projects = listProjects();
     const result: Array<{
@@ -695,7 +937,22 @@ server.tool("overview", "All projects/environments/deployments summary", {}, asy
       }
     }
 
-    return ok(result);
+    return ok(compactToolList(
+      result,
+      params,
+      (row) => ({
+        project: truncateText(row.project, 40),
+        environment: truncateText(row.environment, 40),
+        provider: row.provider,
+        status: row.status,
+        url: truncateText(row.url, 80),
+        last_deploy: row.last_deploy,
+        secrets_count: row.secrets_count,
+        config_count: row.config_count,
+        secret_parity: row.secret_parity,
+      }),
+      "use limit/cursor for paging or verbose:true for full overview rows"
+    ));
   } catch (e) { return err(e); }
 });
 
@@ -744,10 +1001,12 @@ server.tool("add_hook", "Add a deployment hook", {
 server.tool("list_hooks", "List deployment hooks", {
   event: z.enum(["pre-deploy", "post-deploy", "deploy-failed", "pre-rollback", "post-rollback", "pre-promote", "post-promote"]).optional(),
   project_id: z.string().optional(),
+  ...listToolParams,
 }, async (params) => {
   try {
     ensureHooksTable();
-    return ok(listHooks(params.event, params.project_id));
+    const hooks = listHooks(params.event, params.project_id);
+    return ok(compactToolList(hooks, params, summarizeHook, "use verbose:true for full hook commands"));
   } catch (e) { return err(e); }
 });
 
@@ -759,6 +1018,7 @@ server.tool("remove_hook", "Remove a deployment hook", {
 
 server.tool("test_hook", "Test hooks for a given event", {
   event: z.enum(["pre-deploy", "post-deploy", "deploy-failed", "pre-rollback", "post-rollback", "pre-promote", "post-promote"]).describe("Hook event to test"),
+  verbose: z.boolean().optional().describe("Return full hook command output"),
 }, async (params) => {
   try {
     ensureHooksTable();
@@ -770,7 +1030,11 @@ server.tool("test_hook", "Test hooks for a given event", {
       environment_type: "dev",
       provider_type: "railway",
     });
-    return ok(results);
+    return ok({
+      count: results.length,
+      items: params.verbose ? results : results.map(summarizeHookResult),
+      hint: params.verbose ? undefined : "set verbose:true for full hook output",
+    });
   } catch (e) { return err(e); }
 });
 

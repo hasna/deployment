@@ -26,6 +26,26 @@ function rowToDeployment(row: DeploymentRow): Deployment {
   };
 }
 
+function buildDeploymentConditions(filters?: DeploymentFilter): { conditions: string[]; params: (string | number | null)[] } {
+  const conditions: string[] = [];
+  const params: (string | number | null)[] = [];
+
+  if (filters?.project_id) {
+    conditions.push("project_id = ?");
+    params.push(filters.project_id);
+  }
+  if (filters?.environment_id) {
+    conditions.push("environment_id = ?");
+    params.push(filters.environment_id);
+  }
+  if (filters?.status) {
+    conditions.push("status = ?");
+    params.push(filters.status);
+  }
+
+  return { conditions, params };
+}
+
 export function createDeployment(input: CreateDeploymentInput): Deployment {
   const db = getDatabase();
   const id = uuid();
@@ -64,21 +84,7 @@ export function getDeployment(id: string): Deployment {
 
 export function listDeployments(filters?: DeploymentFilter): Deployment[] {
   const db = getDatabase();
-  const conditions: string[] = [];
-  const params: (string | number | null)[] = [];
-
-  if (filters?.project_id) {
-    conditions.push("project_id = ?");
-    params.push(filters.project_id);
-  }
-  if (filters?.environment_id) {
-    conditions.push("environment_id = ?");
-    params.push(filters.environment_id);
-  }
-  if (filters?.status) {
-    conditions.push("status = ?");
-    params.push(filters.status);
-  }
+  const { conditions, params } = buildDeploymentConditions(filters);
 
   let sql = "SELECT * FROM deployments";
   if (conditions.length > 0) {
@@ -97,6 +103,19 @@ export function listDeployments(filters?: DeploymentFilter): Deployment[] {
 
   const rows = db.query(sql).all(...params) as DeploymentRow[];
   return rows.map(rowToDeployment);
+}
+
+export function countDeployments(filters?: DeploymentFilter): number {
+  const db = getDatabase();
+  const { conditions, params } = buildDeploymentConditions(filters);
+
+  let sql = "SELECT COUNT(*) AS count FROM deployments";
+  if (conditions.length > 0) {
+    sql += " WHERE " + conditions.join(" AND ");
+  }
+
+  const row = db.query(sql).get(...params) as { count: number };
+  return row.count;
 }
 
 export function updateDeployment(id: string, updates: UpdateDeploymentInput): Deployment {
