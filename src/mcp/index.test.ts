@@ -1,5 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { z } from "zod";
 import { resetDatabase, closeDatabase } from "../db/database.js";
+import {
+  deployGitHubToolSchema,
+  ghLogsToolSchema,
+  ghStatusToolSchema,
+  ghTriggerToolSchema,
+} from "./github-actions-schemas.js";
 
 describe("mcp/index", () => {
   beforeEach(() => {
@@ -79,13 +86,42 @@ describe("mcp/index", () => {
       "pre_deploy_check",
       "register_agent",
       "list_agents",
+      "storage_status",
+      "storage_push",
+      "storage_pull",
+      "storage_sync",
       "describe_tools",
       "search_tools",
     ];
-    // The TOOL_CATALOG in the source has 43 entries
-    expect(expectedTools.length).toBe(43);
+    // The TOOL_CATALOG in the source has 47 entries
+    expect(expectedTools.length).toBe(47);
+    expect(expectedTools).not.toContain("cloud_status");
+    expect(expectedTools).not.toContain("cloud_push");
+    expect(expectedTools).not.toContain("cloud_pull");
+    expect(expectedTools).not.toContain("cloud_sync");
     // Each name is unique
     const unique = new Set(expectedTools);
     expect(unique.size).toBe(expectedTools.length);
+  });
+
+  it("GitHub Actions MCP schemas reject injection-shaped parameters", () => {
+    const triggerSchema = z.object(ghTriggerToolSchema);
+    const deploySchema = z.object(deployGitHubToolSchema);
+    const statusSchema = z.object(ghStatusToolSchema);
+    const logsSchema = z.object(ghLogsToolSchema);
+
+    expect(triggerSchema.safeParse({
+      repo: "owner/repo",
+      workflow: "deploy.yml",
+      inputs: { message: "hello; echo INJECTED >&2 #" },
+    }).success).toBe(true);
+
+    expect(triggerSchema.safeParse({ repo: "owner/repo; echo INJECTED >&2 #", workflow: "deploy.yml" }).success).toBe(false);
+    expect(triggerSchema.safeParse({ repo: "owner/repo", workflow: "deploy.yml; echo INJECTED >&2 #" }).success).toBe(false);
+    expect(triggerSchema.safeParse({ repo: "owner/repo", workflow: "deploy.yml", inputs: { "bad;key": "value" } }).success).toBe(false);
+    expect(deploySchema.safeParse({ repo: "owner/repo", workflow: "deploy.yml", environment: "prod\nstaging" }).success).toBe(false);
+    expect(statusSchema.safeParse({ repo: "owner/repo", run_id: 12.5 }).success).toBe(false);
+    expect(statusSchema.safeParse({ repo: "owner/repo", workflow: "deploy.yml", limit: 101 }).success).toBe(false);
+    expect(logsSchema.safeParse({ repo: "owner/repo", run_id: 123, lines: 0 }).success).toBe(false);
   });
 });

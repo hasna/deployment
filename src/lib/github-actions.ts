@@ -7,7 +7,115 @@
  * - GITHUB_TOKEN env var
  */
 
-import { execSync } from "child_process";
+import { execFileSync } from "node:child_process";
+
+export const GITHUB_OWNER_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
+export const GITHUB_REPOSITORY_NAME_PATTERN = /^[A-Za-z0-9._-]{1,100}$/;
+export const GITHUB_WORKFLOW_PATTERN = /^(?:\d+|(?:\.github\/workflows\/)?[A-Za-z0-9][A-Za-z0-9._ -]{0,199}(?:\.ya?ml)?)$/;
+export const GITHUB_WORKFLOW_INPUT_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/;
+export const MAX_GITHUB_WORKFLOW_INPUT_VALUE_LENGTH = 20_000;
+
+const MAX_GITHUB_RUN_LIMIT = 100;
+const MAX_GITHUB_LOG_LINES = 1_000;
+const CONTROL_CHARACTER_PATTERN = /[\x00-\x1F\x7F]/;
+const INVALID_GIT_REF_CHARACTER_PATTERN = /[\x00-\x20\x7F~^:?*\[\\]/;
+
+function runGh(args: string[], timeout: number = 30_000): string {
+  return execFileSync("gh", args, { encoding: "utf-8", env: process.env, timeout, stdio: "pipe" });
+}
+
+function formatCommandError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+export function isValidGitHubRepo(repo: string): boolean {
+  const parts = repo.split("/");
+  if (parts.length !== 2) return false;
+  const owner = parts[0];
+  const name = parts[1];
+  return Boolean(
+    owner &&
+    name &&
+    GITHUB_OWNER_PATTERN.test(owner) &&
+    GITHUB_REPOSITORY_NAME_PATTERN.test(name) &&
+    name !== "." &&
+    name !== ".."
+  );
+}
+
+export function validateGitHubRepo(repo: string): string {
+  if (!isValidGitHubRepo(repo)) {
+    throw new Error("Invalid GitHub repo: expected owner/name using a valid GitHub owner and repository name");
+  }
+  return repo;
+}
+
+function repoApiPath(repo: string): string {
+  validateGitHubRepo(repo);
+  const [owner, name] = repo.split("/") as [string, string];
+  return `repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
+}
+
+export function isValidGitHubWorkflow(workflow: string): boolean {
+  return GITHUB_WORKFLOW_PATTERN.test(workflow);
+}
+
+export function validateGitHubWorkflow(workflow: string): string {
+  if (!isValidGitHubWorkflow(workflow)) {
+    throw new Error("Invalid GitHub Actions workflow: expected a workflow name, numeric ID, or safe workflow YAML filename");
+  }
+  return workflow;
+}
+
+export function isValidGitHubWorkflowInputKey(key: string): boolean {
+  return GITHUB_WORKFLOW_INPUT_KEY_PATTERN.test(key);
+}
+
+export function isValidGitHubWorkflowInputValue(value: string): boolean {
+  return value.length <= MAX_GITHUB_WORKFLOW_INPUT_VALUE_LENGTH && !CONTROL_CHARACTER_PATTERN.test(value);
+}
+
+export function validateGitHubWorkflowInputs(inputs?: Record<string, string>): Record<string, string> | undefined {
+  if (!inputs) return undefined;
+
+  const validated: Record<string, string> = {};
+  for (const [key, value] of Object.entries(inputs)) {
+    if (!isValidGitHubWorkflowInputKey(key)) {
+      throw new Error(`Invalid GitHub Actions workflow input key: ${key}`);
+    }
+    if (typeof value !== "string" || !isValidGitHubWorkflowInputValue(value)) {
+      throw new Error(`Invalid GitHub Actions workflow input value for key: ${key}`);
+    }
+    validated[key] = value;
+  }
+  return validated;
+}
+
+export function isValidGitHubBranch(branch: string): boolean {
+  if (!branch || branch.length > 255) return false;
+  if (branch.startsWith("/") || branch.endsWith("/") || branch.endsWith(".") || branch.endsWith(".lock")) return false;
+  if (branch.includes("//") || branch.includes("..") || branch.includes("@{")) return false;
+  return !INVALID_GIT_REF_CHARACTER_PATTERN.test(branch);
+}
+
+export function validateGitHubBranch(branch: string): string {
+  if (!isValidGitHubBranch(branch)) {
+    throw new Error("Invalid GitHub branch/ref name");
+  }
+  return branch;
+}
+
+function validatePositiveInteger(name: string, value: number, max: number): number {
+  if (!Number.isSafeInteger(value) || value < 1 || value > max) {
+    throw new Error(`Invalid ${name}: expected an integer between 1 and ${max}`);
+  }
+  return value;
+}
+
+function tailLines(output: string, lines: number): string {
+  const safeLines = validatePositiveInteger("log line count", lines, MAX_GITHUB_LOG_LINES);
+  return output.trim().split(/\r?\n/).slice(-safeLines).join("\n");
+}
 
 export interface GitHubWorkflowRun {
   id: number;
@@ -56,19 +164,21 @@ export function triggerWorkflow(
   workflow: string,
   inputs?: Record<string, string>
 ): WorkflowTriggerResult {
-  const args = [`gh`, `workflow`, `run`, workflow, `--repo`, repo];
-  if (inputs) {
-    for (const [key, value] of Object.entries(inputs)) {
+  const safeRepo = validateGitHubRepo(repo);
+  const safeWorkflow = validateGitHubWorkflow(workflow);
+  const safeInputs = validateGitHubWorkflowInputs(inputs);
+  const args = ["workflow", "run", safeWorkflow, "--repo", safeRepo];
+  if (safeInputs) {
+    for (const [key, value] of Object.entries(safeInputs)) {
       args.push("-f", `${key}=${value}`);
     }
   }
 
   try {
-    execSync(args.join(" "), { encoding: "utf-8", timeout: 30000 });
-    return { triggered: true, repo, workflow, inputs: inputs ?? {} };
+    runGh(args, 30_000);
+    return { triggered: true, repo: safeRepo, workflow: safeWorkflow, inputs: safeInputs ?? {} };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`Failed to trigger workflow ${workflow} on ${repo}: ${message}`);
+    throw new Error(`Failed to trigger workflow ${safeWorkflow} on ${safeRepo}: ${formatCommandError(err)}`);
   }
 }
 
@@ -82,11 +192,23 @@ export function getLatestRun(
   workflow: string,
   limit: number = 1
 ): GitHubWorkflowRun[] {
+  const safeRepo = validateGitHubRepo(repo);
+  const safeWorkflow = validateGitHubWorkflow(workflow);
+  const safeLimit = validatePositiveInteger("run list limit", limit, MAX_GITHUB_RUN_LIMIT);
+
   try {
-    const output = execSync(
-      `gh run list --workflow=${workflow} --repo ${repo} --limit ${limit} --json databaseId,status,conclusion,createdAt,headBranch,displayTitle,event`,
-      { encoding: "utf-8", timeout: 30000 }
-    );
+    const output = runGh([
+      "run",
+      "list",
+      "--workflow",
+      safeWorkflow,
+      "--repo",
+      safeRepo,
+      "--limit",
+      String(safeLimit),
+      "--json",
+      "databaseId,status,conclusion,createdAt,headBranch,displayTitle,event",
+    ]);
     const runs = JSON.parse(output) as Array<{
       databaseId: number;
       status: string;
@@ -105,7 +227,7 @@ export function getLatestRun(
       headBranch: r.headBranch,
       displayTitle: r.displayTitle,
       event: r.event,
-      htmlUrl: `https://github.com/${repo}/actions/runs/${r.databaseId}`,
+      htmlUrl: `https://github.com/${safeRepo}/actions/runs/${r.databaseId}`,
     }));
   } catch {
     return [];
@@ -116,11 +238,17 @@ export function getLatestRun(
  * Get detailed status of a workflow run including active step.
  */
 export function getRunStatus(repo: string, runId: number): WorkflowStatusResult {
+  const safeRepo = validateGitHubRepo(repo);
+  const safeRunId = validatePositiveInteger("workflow run ID", runId, Number.MAX_SAFE_INTEGER);
+  const apiRepo = repoApiPath(safeRepo);
+
   try {
-    const runsOutput = execSync(
-      `gh api repos/${repo}/actions/runs/${runId} --jq '{status,conclusion,createdAt: .created_at,headBranch: .head_branch,displayTitle: .display_title,event}'`,
-      { encoding: "utf-8", timeout: 30000 }
-    );
+    const runsOutput = runGh([
+      "api",
+      `${apiRepo}/actions/runs/${safeRunId}`,
+      "--jq",
+      "{status,conclusion,createdAt: .created_at,headBranch: .head_branch,displayTitle: .display_title,event}",
+    ]);
     const runData = JSON.parse(runsOutput) as {
       status: string;
       conclusion: string | null;
@@ -131,21 +259,23 @@ export function getRunStatus(repo: string, runId: number): WorkflowStatusResult 
     };
 
     const run: GitHubWorkflowRun = {
-      id: runId,
+      id: safeRunId,
       status: runData.status as GitHubWorkflowRun["status"],
       conclusion: (runData.conclusion || null) as GitHubWorkflowRun["conclusion"],
       createdAt: runData.createdAt,
       headBranch: runData.headBranch,
       displayTitle: runData.displayTitle,
       event: runData.event,
-      htmlUrl: `https://github.com/${repo}/actions/runs/${runId}`,
+      htmlUrl: `https://github.com/${safeRepo}/actions/runs/${safeRunId}`,
     };
 
     // Get jobs and active step
-    const jobsOutput = execSync(
-      `gh api repos/${repo}/actions/runs/${runId}/jobs --jq '[.jobs[] | {name, status, conclusion, steps: [.steps[] | {name, status, conclusion}]}]'`,
-      { encoding: "utf-8", timeout: 30000 }
-    );
+    const jobsOutput = runGh([
+      "api",
+      `${apiRepo}/actions/runs/${safeRunId}/jobs`,
+      "--jq",
+      "[.jobs[] | {name, status, conclusion, steps: [.steps[] | {name, status, conclusion}]}]",
+    ]);
     const jobs = JSON.parse(jobsOutput) as GitHubJob[];
 
     // Find the currently active step
@@ -172,11 +302,13 @@ export function getRunStatus(repo: string, runId: number): WorkflowStatusResult 
  * Get failure logs for a workflow run.
  */
 export function getFailureLogs(repo: string, runId: number, lines: number = 30): string {
+  const safeRepo = validateGitHubRepo(repo);
+  const safeRunId = validatePositiveInteger("workflow run ID", runId, Number.MAX_SAFE_INTEGER);
+  validatePositiveInteger("log line count", lines, MAX_GITHUB_LOG_LINES);
+
   try {
-    return execSync(
-      `gh run view ${runId} --repo ${repo} --log-failed 2>&1 | tail -${lines}`,
-      { encoding: "utf-8", timeout: 30000 }
-    ).trim();
+    const output = runGh(["run", "view", String(safeRunId), "--repo", safeRepo, "--log-failed"]);
+    return tailLines(output, lines);
   } catch {
     return "(no logs available)";
   }
@@ -186,21 +318,18 @@ export function getFailureLogs(repo: string, runId: number, lines: number = 30):
  * Get annotations (error messages) for a workflow run.
  */
 export function getAnnotations(repo: string, runId: number): string[] {
+  const safeRunId = validatePositiveInteger("workflow run ID", runId, Number.MAX_SAFE_INTEGER);
+  const apiRepo = repoApiPath(repo);
+
   try {
-    const jobsOutput = execSync(
-      `gh api repos/${repo}/actions/runs/${runId}/jobs --jq '.jobs[].id'`,
-      { encoding: "utf-8", timeout: 30000 }
-    );
-    const jobIds = jobsOutput.trim().split("\n").filter(Boolean);
+    const jobsOutput = runGh(["api", `${apiRepo}/actions/runs/${safeRunId}/jobs`, "--jq", ".jobs[].id"]);
+    const jobIds = jobsOutput.trim().split(/\r?\n/).filter((jobId) => /^\d+$/.test(jobId));
 
     const annotations: string[] = [];
     for (const jobId of jobIds) {
       try {
-        const output = execSync(
-          `gh api repos/${repo}/check-runs/${jobId}/annotations --jq '.[].message'`,
-          { encoding: "utf-8", timeout: 15000 }
-        );
-        annotations.push(...output.trim().split("\n").filter(Boolean));
+        const output = runGh(["api", `${apiRepo}/check-runs/${jobId}/annotations`, "--jq", ".[].message"], 15_000);
+        annotations.push(...output.trim().split(/\r?\n/).filter(Boolean));
       } catch {
         // skip
       }
@@ -217,11 +346,11 @@ export function getAnnotations(repo: string, runId: number): string[] {
  * Get the latest commit SHA on a branch.
  */
 export function getLatestCommit(repo: string, branch: string = "main"): string | null {
+  const safeBranch = validateGitHubBranch(branch);
+  const apiRepo = repoApiPath(repo);
+
   try {
-    return execSync(
-      `gh api repos/${repo}/commits/${branch} --jq '.sha'`,
-      { encoding: "utf-8", timeout: 15000 }
-    ).trim() || null;
+    return runGh(["api", `${apiRepo}/commits/${encodeURIComponent(safeBranch)}`, "--jq", ".sha"], 15_000).trim() || null;
   } catch {
     return null;
   }
@@ -246,7 +375,7 @@ export function checkForNewCommit(
  */
 export function isGhAuthenticated(): boolean {
   try {
-    execSync("gh auth status", { encoding: "utf-8", timeout: 10000, stdio: "pipe" });
+    runGh(["auth", "status"], 10_000);
     return true;
   } catch {
     return false;

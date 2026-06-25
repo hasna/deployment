@@ -23,12 +23,22 @@ import { RailwayProvider } from "../lib/railway.js";
 import { FlyioProvider } from "../lib/flyio.js";
 import { AwsProvider } from "../lib/aws.js";
 import { DigitalOceanProvider } from "../lib/digitalocean.js";
-<<<<<<< Updated upstream
 import { PACKAGE_DESCRIPTION, PACKAGE_VERSION } from "../lib/package.js";
-=======
-import { triggerWorkflow, getLatestRun, getRunStatus, getFailureLogs, isGhAuthenticated } from "../lib/github-actions.js";
+import {
+  triggerWorkflow,
+  getLatestRun,
+  getRunStatus,
+  getFailureLogs,
+  isGhAuthenticated,
+} from "../lib/github-actions.js";
 import { runPreDeployChecks } from "../lib/pre-deploy-checks.js";
->>>>>>> Stashed changes
+import { registerDeploymentStorageTools } from "./storage-tools.js";
+import {
+  deployGitHubToolSchema,
+  ghLogsToolSchema,
+  ghStatusToolSchema,
+  ghTriggerToolSchema,
+} from "./github-actions-schemas.js";
 import type { SourceType, ProviderType, EnvironmentType } from "../types/index.js";
 
 function handleProcessFlags(argv: readonly string[]): void {
@@ -65,6 +75,7 @@ registerProvider(new DigitalOceanProvider());
 seedBuiltinBlueprints();
 
 const server = new McpServer({ name: "deployment", version: PACKAGE_VERSION });
+registerDeploymentStorageTools(server);
 
 function ok(data: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
@@ -127,6 +138,10 @@ const TOOL_CATALOG = [
   { name: "list_hooks", description: "List deployment hooks" },
   { name: "remove_hook", description: "Remove a deployment hook" },
   { name: "test_hook", description: "Test hooks for a given event" },
+  { name: "storage_status", description: "Show remote storage sync configuration and local sync history" },
+  { name: "storage_push", description: "Push local deployment data to remote PostgreSQL storage" },
+  { name: "storage_pull", description: "Pull deployment data from remote PostgreSQL storage to local SQLite" },
+  { name: "storage_sync", description: "Bidirectional storage sync: pull then push" },
   { name: "describe_tools", description: "List all available tools" },
   { name: "search_tools", description: "Search tools by keyword" },
 ];
@@ -520,13 +535,7 @@ server.tool("deploy_sequence", "Deploy to multiple environments sequentially", {
   } catch (e) { return err(e); }
 });
 
-server.tool("deploy_github", "Deploy via GitHub Actions workflow_dispatch", {
-  repo: z.string().describe("GitHub repo (owner/name)"),
-  workflow: z.string().describe("Workflow filename (e.g. deploy.yml)"),
-  environment: z.string().describe("Target environment"),
-  inputs: z.record(z.string()).optional().describe("Additional workflow inputs"),
-  poll: z.boolean().optional().describe("Wait for completion (default: false)"),
-}, async (params) => {
+server.tool("deploy_github", "Deploy via GitHub Actions workflow_dispatch", deployGitHubToolSchema, async (params) => {
   try {
     return ok(await deployViaGitHub(
       { repo: params.repo, workflow: params.workflow, environment: params.environment, inputs: params.inputs },
@@ -537,11 +546,7 @@ server.tool("deploy_github", "Deploy via GitHub Actions workflow_dispatch", {
 
 // ── GitHub Actions Tools ────────────────────────────────────────────────────
 
-server.tool("gh_trigger", "Trigger a GitHub Actions workflow", {
-  repo: z.string().describe("GitHub repo (owner/name)"),
-  workflow: z.string().describe("Workflow filename (e.g. deploy.yml)"),
-  inputs: z.record(z.string()).optional().describe("Workflow dispatch inputs"),
-}, async (params) => {
+server.tool("gh_trigger", "Trigger a GitHub Actions workflow", ghTriggerToolSchema, async (params) => {
   try {
     if (!isGhAuthenticated()) {
       return err(new Error("GitHub CLI not authenticated. Run: gh auth login"));
@@ -550,12 +555,7 @@ server.tool("gh_trigger", "Trigger a GitHub Actions workflow", {
   } catch (e) { return err(e); }
 });
 
-server.tool("gh_status", "Get GitHub Actions workflow run status", {
-  repo: z.string().describe("GitHub repo (owner/name)"),
-  workflow: z.string().optional().describe("Workflow filename (e.g. deploy.yml)"),
-  run_id: z.number().optional().describe("Specific run ID to check"),
-  limit: z.number().optional().describe("Number of recent runs (default: 3)"),
-}, async (params) => {
+server.tool("gh_status", "Get GitHub Actions workflow run status", ghStatusToolSchema, async (params) => {
   try {
     if (params.run_id) {
       return ok(getRunStatus(params.repo, params.run_id));
@@ -567,11 +567,7 @@ server.tool("gh_status", "Get GitHub Actions workflow run status", {
   } catch (e) { return err(e); }
 });
 
-server.tool("gh_logs", "Get failure logs from a GitHub Actions run", {
-  repo: z.string().describe("GitHub repo (owner/name)"),
-  run_id: z.number().describe("Workflow run ID"),
-  lines: z.number().optional().describe("Number of log lines (default: 30)"),
-}, async (params) => {
+server.tool("gh_logs", "Get failure logs from a GitHub Actions run", ghLogsToolSchema, async (params) => {
   try {
     return ok({ logs: getFailureLogs(params.repo, params.run_id, params.lines ?? 30) });
   } catch (e) { return err(e); }

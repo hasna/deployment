@@ -1,5 +1,5 @@
 /**
- * PostgreSQL migrations for open-deployment cloud sync.
+ * PostgreSQL migrations for open-deployment remote storage sync.
  *
  * Equivalent to the SQLite schema in database.ts, translated for PostgreSQL.
  */
@@ -54,6 +54,10 @@ export const PG_MIGRATIONS: string[] = [
     logs TEXT NOT NULL DEFAULT '',
     started_at TEXT NOT NULL DEFAULT '',
     completed_at TEXT NOT NULL DEFAULT '',
+    failure_reason TEXT NOT NULL DEFAULT '',
+    build_skipped BOOLEAN NOT NULL DEFAULT FALSE,
+    duration_seconds INTEGER NOT NULL DEFAULT 0,
+    triggered_by TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
   )`,
 
@@ -91,7 +95,35 @@ export const PG_MIGRATIONS: string[] = [
     last_seen TEXT NOT NULL
   )`,
 
-  // Migration 8: indexes
+  // Migration 8: secrets table
+  `CREATE TABLE IF NOT EXISTS secrets (
+    id TEXT PRIMARY KEY,
+    project_name TEXT NOT NULL,
+    environment TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT 'local',
+    aws_arn TEXT NOT NULL DEFAULT '',
+    last_rotated TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(project_name, environment, key)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_secrets_project_env ON secrets(project_name, environment)`,
+
+  // Migration 9: hooks table
+  `CREATE TABLE IF NOT EXISTS deployment_hooks (
+    id TEXT PRIMARY KEY,
+    event TEXT NOT NULL,
+    command TEXT NOT NULL,
+    project_id TEXT,
+    environment_id TEXT,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_hooks_event ON deployment_hooks(event)`,
+
+  // Migration 10: indexes
   `CREATE INDEX IF NOT EXISTS idx_environments_project ON environments(project_id)`,
   `CREATE INDEX IF NOT EXISTS idx_deployments_project ON deployments(project_id)`,
   `CREATE INDEX IF NOT EXISTS idx_deployments_env ON deployments(environment_id)`,
@@ -101,7 +133,7 @@ export const PG_MIGRATIONS: string[] = [
   `CREATE INDEX IF NOT EXISTS idx_providers_type ON providers(type)`,
   `CREATE INDEX IF NOT EXISTS idx_blueprints_provider ON blueprints(provider_type)`,
 
-  // Migration 9: feedback table
+  // Migration 11: feedback table
   `CREATE TABLE IF NOT EXISTS feedback (
     id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     message TEXT NOT NULL,

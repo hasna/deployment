@@ -1,6 +1,6 @@
 {
   "name": "@hasna/deployment",
-  "version": "0.0.8",
+  "version": "0.0.11",
   "description": "General-purpose deployment orchestration for AI agents — provision infrastructure, deploy apps, manage environments. CLI + MCP + REST + SDK.",
   "type": "module",
   "main": "dist/index.js",
@@ -9,6 +9,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./storage": {
+      "types": "./dist/storage.d.ts",
+      "import": "./dist/storage.js"
     }
   },
   "bin": {
@@ -17,7 +21,8 @@
     "deployment-serve": "dist/server/index.js"
   },
   "scripts": {
-    "build": "bun build src/cli/index.ts --outdir dist/cli --target bun --external commander --external chalk --external @modelcontextprotocol/sdk --external hono --external @hasna/secrets && bun build src/mcp/index.ts --outdir dist/mcp --target bun --external @modelcontextprotocol/sdk && bun build src/server/index.ts --outdir dist/server --target bun --external hono && bun build src/index.ts --outdir dist --target bun && tsc --emitDeclarationOnly --outDir dist",
+    "clean": "rm -rf dist",
+    "build": "bun run clean && bun build src/cli/index.ts --outdir dist/cli --target bun --external commander --external chalk --external @modelcontextprotocol/sdk --external hono --external @hasna/secrets && bun build src/mcp/index.ts --outdir dist/mcp --target bun --external @modelcontextprotocol/sdk && bun build src/server/index.ts --outdir dist/server --target bun --external hono && bun build src/index.ts src/storage.ts --outdir dist --target bun && tsc --emitDeclarationOnly --outDir dist",
     "dev:cli": "bun run src/cli/index.ts",
     "dev:mcp": "bun run src/mcp/index.ts",
     "dev:serve": "bun run src/server/index.ts",
@@ -55,12 +60,13 @@
   "author": "Andrei Hasna <andrei@hasna.com>",
   "license": "Apache-2.0",
   "dependencies": {
-    "@hasna/cloud": "^0.1.24",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "chalk": "^5.4.1",
     "commander": "^13.1.0",
     "hono": "^4.7.4",
-    "zod": "^3.24.2"
+    "pg": "^8.13.3",
+    "zod": "^3.24.2",
+    "@hasna/events": "^0.1.6"
   },
   "devDependencies": {
     "@types/bun": "^1.2.4",

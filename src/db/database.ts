@@ -1,13 +1,15 @@
 import { Database } from "bun:sqlite";
-import { SqliteAdapter, ensureFeedbackTable, migrateDotfile } from "@hasna/cloud";
 import { randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
 let db: Database | null = null;
-let _adapter: SqliteAdapter | null = null;
 const AGENTS_PROJECT_ID_MIGRATION = `ALTER TABLE agents ADD COLUMN project_id TEXT`;
+const DEPLOYMENT_FAILURE_REASON_MIGRATION = `ALTER TABLE deployments ADD COLUMN failure_reason TEXT NOT NULL DEFAULT ''`;
+const DEPLOYMENT_BUILD_SKIPPED_MIGRATION = `ALTER TABLE deployments ADD COLUMN build_skipped INTEGER NOT NULL DEFAULT 0`;
+const DEPLOYMENT_DURATION_SECONDS_MIGRATION = `ALTER TABLE deployments ADD COLUMN duration_seconds INTEGER NOT NULL DEFAULT 0`;
+const DEPLOYMENT_TRIGGERED_BY_MIGRATION = `ALTER TABLE deployments ADD COLUMN triggered_by TEXT NOT NULL DEFAULT ''`;
 
 const MIGRATIONS = [
   // v1: Core tables
@@ -107,18 +109,21 @@ const MIGRATIONS = [
   `CREATE INDEX IF NOT EXISTS idx_providers_type ON providers(type)`,
   `CREATE INDEX IF NOT EXISTS idx_blueprints_provider ON blueprints(provider_type)`,
   // v2: Add project_id to agents for set_focus support
-<<<<<<< Updated upstream
   AGENTS_PROJECT_ID_MIGRATION,
-=======
-  `ALTER TABLE agents ADD COLUMN project_id TEXT`,
   // v3: Deployment history tracking
-  `ALTER TABLE deployments ADD COLUMN failure_reason TEXT NOT NULL DEFAULT ''`,
-  `ALTER TABLE deployments ADD COLUMN build_skipped INTEGER NOT NULL DEFAULT 0`,
-  `ALTER TABLE deployments ADD COLUMN duration_seconds INTEGER NOT NULL DEFAULT 0`,
-  `ALTER TABLE deployments ADD COLUMN triggered_by TEXT NOT NULL DEFAULT ''`,
->>>>>>> Stashed changes
+  DEPLOYMENT_FAILURE_REASON_MIGRATION,
+  DEPLOYMENT_BUILD_SKIPPED_MIGRATION,
+  DEPLOYMENT_DURATION_SECONDS_MIGRATION,
+  DEPLOYMENT_TRIGGERED_BY_MIGRATION,
 ];
 const AGENTS_PROJECT_ID_MIGRATION_INDEX = MIGRATIONS.indexOf(AGENTS_PROJECT_ID_MIGRATION);
+const COLUMN_MIGRATIONS = new Map<number, [table: string, column: string]>([
+  [AGENTS_PROJECT_ID_MIGRATION_INDEX, ["agents", "project_id"]],
+  [MIGRATIONS.indexOf(DEPLOYMENT_FAILURE_REASON_MIGRATION), ["deployments", "failure_reason"]],
+  [MIGRATIONS.indexOf(DEPLOYMENT_BUILD_SKIPPED_MIGRATION), ["deployments", "build_skipped"]],
+  [MIGRATIONS.indexOf(DEPLOYMENT_DURATION_SECONDS_MIGRATION), ["deployments", "duration_seconds"]],
+  [MIGRATIONS.indexOf(DEPLOYMENT_TRIGGERED_BY_MIGRATION), ["deployments", "triggered_by"]],
+]);
 
 export function getDataDir(): string {
   const home = process.env["HOME"] || process.env["USERPROFILE"] || homedir();
@@ -126,6 +131,32 @@ export function getDataDir(): string {
   const newDir = join(home, ".hasna", "deployment");
   mkdirSync(newDir, { recursive: true });
   return newDir;
+}
+
+function migrateDotfile(name: string): void {
+  const home = process.env["HOME"] || process.env["USERPROFILE"] || homedir();
+  const oldDir = join(home, `.${name}`);
+  const newDir = join(home, ".hasna", name);
+  if (!existsSync(oldDir) || existsSync(newDir)) return;
+  mkdirSync(newDir, { recursive: true });
+  for (const file of readdirSync(oldDir)) {
+    const oldPath = join(oldDir, file);
+    if (statSync(oldPath).isFile()) copyFileSync(oldPath, join(newDir, file));
+  }
+}
+
+function ensureFeedbackTable(database: Database): void {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS feedback (
+      id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+      message TEXT NOT NULL,
+      email TEXT,
+      category TEXT DEFAULT 'general',
+      version TEXT,
+      machine_id TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
 }
 
 function getDbPath(): string {
@@ -159,10 +190,8 @@ function runMigrations(database: Database): void {
 
   for (let i = 0; i < MIGRATIONS.length; i++) {
     if (!appliedSet.has(i)) {
-      if (
-        i === AGENTS_PROJECT_ID_MIGRATION_INDEX &&
-        hasColumn(database, "agents", "project_id")
-      ) {
+      const columnMigration = COLUMN_MIGRATIONS.get(i);
+      if (columnMigration && hasColumn(database, columnMigration[0], columnMigration[1])) {
         database
           .query("INSERT INTO _migrations (id, applied_at) VALUES (?, ?)")
           .run(i, now());
@@ -181,10 +210,12 @@ export function getDatabase(): Database {
   if (db) return db;
 
   const dbPath = getDbPath();
-  _adapter = new SqliteAdapter(dbPath);
-  db = _adapter.raw;
+  if (dbPath !== ":memory:") mkdirSync(dirname(dbPath), { recursive: true });
+  db = new Database(dbPath);
+  db.exec("PRAGMA journal_mode = WAL");
+  db.exec("PRAGMA foreign_keys = ON");
   runMigrations(db);
-  ensureFeedbackTable(_adapter);
+  ensureFeedbackTable(db);
   return db;
 }
 
@@ -192,7 +223,6 @@ export function closeDatabase(): void {
   if (db) {
     db.close();
     db = null;
-    _adapter = null;
   }
 }
 

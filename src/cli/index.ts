@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { Command } from "commander";
+import { registerEventsCommands } from "@hasna/events/commander";
 import chalk from "chalk";
 import { createProject, getProject, listProjects, deleteProject } from "../db/projects.js";
 import { createEnvironment, getEnvironment, listEnvironments, deleteEnvironment } from "../db/environments.js";
@@ -24,6 +25,7 @@ import { FlyioProvider } from "../lib/flyio.js";
 import { AwsProvider } from "../lib/aws.js";
 import { DigitalOceanProvider } from "../lib/digitalocean.js";
 import { PACKAGE_VERSION } from "../lib/package.js";
+import { registerStorageCommands } from "./storage.js";
 import type { SourceType, ProviderType, EnvironmentType } from "../types/index.js";
 
 // Register all providers
@@ -74,6 +76,8 @@ const program = new Command()
   .name("deployment")
   .description("General-purpose deployment orchestration for AI agents")
   .version(PACKAGE_VERSION);
+
+registerStorageCommands(program);
 
 // ── Project Commands ────────────────────────────────────────────────────────
 
@@ -960,5 +964,7 @@ program
       console.log(chalk.green("✓") + " Feedback saved. Thank you!");
     } catch (e) { handleError(e); }
   });
+registerEventsCommands(program, { source: "deployment" });
+
 
 program.parse(process.argv);

@@ -38,14 +38,17 @@ deployment-mcp
 deployment-serve
 ```
 
-## Cloud Sync
+## Storage Sync
 
-This package supports cloud sync via `@hasna/cloud`:
+Deployment stores data locally in `~/.hasna/deployment/deployment.db` by default. Set one of these environment variables to sync with a remote PostgreSQL storage database:
 
 ```bash
-cloud setup
-cloud sync push --service deployment
-cloud sync pull --service deployment
+export HASNA_DEPLOYMENT_DATABASE_URL="postgres://..."
+
+deployment storage status
+deployment storage push
+deployment storage pull
+deployment storage sync
 ```
 
 ## Data Directory
