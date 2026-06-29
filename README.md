@@ -37,9 +37,9 @@ deployment-mcp
 Long-lived Streamable HTTP transport for shared agent sessions (binds `127.0.0.1` only):
 
 ```bash
-deployment-mcp --http              # default port 8813
-deployment-mcp --http --port 8813
-MCP_HTTP=1 MCP_HTTP_PORT=8813 deployment-mcp
+deployment-mcp --http              # default port 8858
+deployment-mcp --http --port 8858
+MCP_HTTP=1 MCP_HTTP_PORT=8858 deployment-mcp
 ```
 
 - `GET /health` → `{"status":"ok","name":"deployment"}`
@@ -53,19 +53,14 @@ Stdio remains the default transport for gradual rollout.
 deployment-serve
 ```
 
-## Cloud Sync
-
-This package supports cloud sync via `@hasna/cloud`:
-
-```bash
-cloud setup
-cloud sync push --service deployment
-cloud sync pull --service deployment
-```
-
 ## Data Directory
 
-Data is stored in `~/.hasna/deployment/`.
+Runtime data is stored locally in `~/.hasna/deployment/`.
+
+Storage is explicitly local-only today. `DATABASE_URL` and other database URL
+variables do not switch the runtime store. Use `HASNA_DEPLOYMENT_DB_PATH` or
+`OPEN_DEPLOYMENT_DB` to override the SQLite path, and keep
+`HASNA_DEPLOYMENT_STORAGE_MODE=local` when setting a mode explicitly.
 
 ## License
 

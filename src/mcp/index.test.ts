@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { resetDatabase, closeDatabase } from "../db/database.js";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 describe("mcp/index", () => {
   beforeEach(() => {
@@ -34,58 +36,20 @@ describe("mcp/index", () => {
     expect(agents.length).toBe(1);
   });
 
-  it("TOOL_CATALOG would contain expected tool names", () => {
-    // We can't import the module directly since it starts the MCP server
-    // with top-level await. Instead, verify the expected tool names.
-    const expectedTools = [
-      "create_project",
-      "list_projects",
-      "get_project",
-      "delete_project",
-      "create_environment",
-      "list_environments",
-      "get_environment",
-      "delete_environment",
-      "add_provider",
-      "list_providers",
-      "get_provider",
-      "remove_provider",
-      "deploy",
-      "get_deployment_status",
-      "list_deployments",
-      "get_deployment_logs",
-      "rollback",
-      "promote",
-      "list_resources",
-      "destroy_resource",
-      "list_blueprints",
-      "get_blueprint",
-      "apply_blueprint",
-      "set_secret",
-      "list_secrets",
-      "diff_secrets",
-      "sync_secrets",
-      "set_config",
-      "list_config",
-      "check_secret_parity",
-      "rotate_secret",
-      "logs_tail",
-      "ecs_status",
-      "deploy_sequence",
-      "deploy_github",
-      "gh_trigger",
-      "gh_status",
-      "gh_logs",
-      "pre_deploy_check",
-      "register_agent",
-      "list_agents",
-      "describe_tools",
-      "search_tools",
-    ];
-    // The TOOL_CATALOG in the source has 43 entries
-    expect(expectedTools.length).toBe(43);
-    // Each name is unique
-    const unique = new Set(expectedTools);
-    expect(unique.size).toBe(expectedTools.length);
+  it("TOOL_CATALOG matches registered server tools", () => {
+    const source = readFileSync(join(process.cwd(), "src", "mcp", "index.ts"), "utf8");
+    const catalogBlock = source.match(/const TOOL_CATALOG = \[([\s\S]*?)\];/);
+    expect(catalogBlock).toBeTruthy();
+
+    const catalogTools = [...catalogBlock![1]!.matchAll(/\{ name: "([^"]+)"/g)]
+      .map((match) => match[1]!)
+      .sort();
+    const registeredTools = [...source.matchAll(/server\.tool\("([^"]+)"/g)]
+      .map((match) => match[1]!)
+      .sort();
+
+    expect(catalogTools).toEqual(registeredTools);
+    expect(catalogTools).toContain("send_feedback");
+    expect(new Set(catalogTools).size).toBe(catalogTools.length);
   });
 });

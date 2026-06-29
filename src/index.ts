@@ -2,7 +2,8 @@
 export * from "./types/index.js";
 
 // Database
-export { getDatabase, closeDatabase, resetDatabase, uuid, now, resolvePartialId } from "./db/database.js";
+export { getDatabase, closeDatabase, resetDatabase, saveFeedback, uuid, now, resolvePartialId } from "./db/database.js";
+export type { SaveFeedbackInput } from "./db/database.js";
 
 // Database — PostgreSQL migrations
 export { PG_MIGRATIONS } from "./db/pg-migrations.js";

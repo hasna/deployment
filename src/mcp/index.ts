@@ -15,6 +15,7 @@ import { setDeploymentSecret, listDeploymentSecrets, diffSecrets, checkSecretPar
 import { registerProvider, getProvider as getRegisteredProvider } from "../lib/provider.js";
 import { detectProjectType } from "../lib/detect.js";
 import { addHook, listHooks, removeHook, runHooks, ensureHooksTable } from "../lib/hooks.js";
+import { saveFeedback } from "../db/database.js";
 import { getLatestDeployment } from "../db/deployments.js";
 import { timeAgo } from "../lib/format.js";
 import { VercelProvider } from "../lib/vercel.js";
@@ -125,6 +126,7 @@ const TOOL_CATALOG = [
   { name: "list_hooks", description: "List deployment hooks" },
   { name: "remove_hook", description: "Remove a deployment hook" },
   { name: "test_hook", description: "Test hooks for a given event" },
+  { name: "send_feedback", description: "Send feedback about this service" },
   { name: "describe_tools", description: "List all available tools" },
   { name: "search_tools", description: "Search tools by keyword" },
 ];
@@ -782,12 +784,12 @@ server.tool("send_feedback", "Send feedback about this service", {
   category: z.enum(["bug", "feature", "general"]).optional().describe("Feedback category"),
 }, async (params) => {
   try {
-    const { getDatabase } = await import("../db/database.js");
-    const db = getDatabase();
-    db.run(
-      "INSERT INTO feedback (message, email, category, version) VALUES (?, ?, ?, ?)",
-      [params.message, params.email || null, params.category || "general", PACKAGE_VERSION]
-    );
+    saveFeedback({
+      message: params.message,
+      email: params.email || null,
+      category: params.category || "general",
+      version: PACKAGE_VERSION,
+    });
     return ok({ message: "Feedback saved. Thank you!" });
   } catch (e) { return err(e); }
 });

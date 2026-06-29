@@ -1,5 +1,5 @@
 /**
- * PostgreSQL migrations for open-deployment cloud sync.
+ * PostgreSQL migrations for deployment-owned remote storage.
  *
  * Equivalent to the SQLite schema in database.ts, translated for PostgreSQL.
  */
@@ -104,11 +104,12 @@ export const PG_MIGRATIONS: string[] = [
   // Migration 9: feedback table
   `CREATE TABLE IF NOT EXISTS feedback (
     id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    service TEXT NOT NULL DEFAULT 'deployment',
+    version TEXT DEFAULT '',
     message TEXT NOT NULL,
-    email TEXT,
     category TEXT DEFAULT 'general',
-    version TEXT,
-    machine_id TEXT,
+    email TEXT DEFAULT '',
+    machine_id TEXT DEFAULT '',
     created_at TEXT NOT NULL DEFAULT NOW()::text
   )`,
 ];

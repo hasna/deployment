@@ -18,6 +18,7 @@ import { timeAgo } from "../lib/format.js";
 import { addHook, listHooks, removeHook, runHooks, ensureHooksTable } from "../lib/hooks.js";
 import type { DeploymentHookEvent } from "../lib/hooks.js";
 import { getLatestDeployment } from "../db/deployments.js";
+import { saveFeedback } from "../db/database.js";
 import { VercelProvider } from "../lib/vercel.js";
 import { CloudflareProvider } from "../lib/cloudflare.js";
 import { RailwayProvider } from "../lib/railway.js";
@@ -952,12 +953,12 @@ program
   .option("-c, --category <cat>", "Category: bug, feature, general", "general")
   .action(async (message: string, opts: { email?: string; category?: string }) => {
     try {
-      const { getDatabase } = await import("../db/database.js");
-      const db = getDatabase();
-      db.run(
-        "INSERT INTO feedback (message, email, category, version) VALUES (?, ?, ?, ?)",
-        [message, opts.email || null, opts.category || "general", PACKAGE_VERSION]
-      );
+      saveFeedback({
+        message,
+        email: opts.email || null,
+        category: opts.category || "general",
+        version: PACKAGE_VERSION,
+      });
       console.log(chalk.green("✓") + " Feedback saved. Thank you!");
     } catch (e) { handleError(e); }
   });

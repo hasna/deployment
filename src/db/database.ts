@@ -1,12 +1,16 @@
 import { Database } from "bun:sqlite";
-import { SqliteAdapter, ensureFeedbackTable, migrateDotfile } from "@hasna/cloud";
 import { randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
-import { join } from "node:path";
-import { homedir } from "node:os";
+import { copyFileSync, cpSync, existsSync, mkdirSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { homedir, hostname } from "node:os";
 
 let db: Database | null = null;
-let _adapter: SqliteAdapter | null = null;
+
+const PRIMARY_STORAGE_MODE_ENV = "HASNA_DEPLOYMENT_STORAGE_MODE";
+const FALLBACK_STORAGE_MODE_ENV = "DEPLOYMENT_STORAGE_MODE";
+const LOCAL_STORAGE_MODES = new Set(["", "local", "sqlite"]);
+
+export type DeploymentStorageMode = "local";
 
 interface SqliteColumnInfo {
   name: string;
@@ -21,6 +25,17 @@ interface AddColumnMigration {
   type: string;
   notNull: boolean;
   defaultValue: string | null;
+}
+
+export interface SaveFeedbackInput {
+  id?: string;
+  service?: string;
+  version?: string;
+  message: string;
+  email?: string | null;
+  category?: string | null;
+  machine_id?: string;
+  created_at?: string;
 }
 
 const MIGRATIONS = [
@@ -131,10 +146,70 @@ const MIGRATIONS = [
 
 export function getDataDir(): string {
   const home = process.env["HOME"] || process.env["USERPROFILE"] || homedir();
-  migrateDotfile("deployment");
+  migrateLegacyDeploymentDir(home);
   const newDir = join(home, ".hasna", "deployment");
   mkdirSync(newDir, { recursive: true });
   return newDir;
+}
+
+export function getStorageMode(): DeploymentStorageMode {
+  const rawMode =
+    process.env[PRIMARY_STORAGE_MODE_ENV] ??
+    process.env[FALLBACK_STORAGE_MODE_ENV] ??
+    "local";
+  const mode = rawMode.trim().toLowerCase();
+
+  if (LOCAL_STORAGE_MODES.has(mode)) return "local";
+
+  throw new Error(
+    "Unsupported deployment storage mode. " +
+      `Runtime storage is local SQLite only; set ${PRIMARY_STORAGE_MODE_ENV}=local or ${FALLBACK_STORAGE_MODE_ENV}=local. ` +
+      "Database URL variables do not select remote storage."
+  );
+}
+
+function migrateLegacyDeploymentDir(home: string): void {
+  const hasnaDir = join(home, ".hasna");
+  const newDir = join(hasnaDir, "deployment");
+  const oldDir = join(home, ".deployment");
+  const oldDbPath = join(oldDir, "deployment.db");
+  const newDbPath = join(newDir, "deployment.db");
+
+  if (!existsSync(newDir) && existsSync(oldDir)) {
+    try {
+      mkdirSync(hasnaDir, { recursive: true });
+      cpSync(oldDir, newDir, { recursive: true });
+      return;
+    } catch {
+      // Best-effort compatibility migration; the canonical directory is still created below.
+    }
+  }
+
+  if (!existsSync(newDbPath) && existsSync(oldDbPath)) {
+    copyLegacyDatabaseFiles(oldDir, newDir);
+  }
+}
+
+function copyLegacyDatabaseFiles(oldDir: string, newDir: string): void {
+  const databaseFiles = [
+    "deployment.db",
+    "deployment.db-wal",
+    "deployment.db-shm",
+    "deployment.db-journal",
+  ];
+
+  try {
+    mkdirSync(newDir, { recursive: true });
+    for (const file of databaseFiles) {
+      const source = join(oldDir, file);
+      const destination = join(newDir, file);
+      if (existsSync(source) && !existsSync(destination)) {
+        copyFileSync(source, destination);
+      }
+    }
+  } catch {
+    // The DB will be created normally if the compatibility copy cannot run.
+  }
 }
 
 function getDbPath(): string {
@@ -226,23 +301,67 @@ function runMigrations(database: Database): void {
   }
 }
 
+function configureDatabase(database: Database): void {
+  database.run("PRAGMA foreign_keys = ON");
+  database.run("PRAGMA journal_mode = WAL");
+  database.run("PRAGMA busy_timeout = 5000");
+}
+
+function ensureParentDir(dbPath: string): void {
+  if (dbPath === ":memory:") return;
+  mkdirSync(dirname(dbPath), { recursive: true });
+}
+
+function ensureFeedbackTable(database: Database): void {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS feedback (
+      id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+      service TEXT NOT NULL DEFAULT 'deployment',
+      version TEXT DEFAULT '',
+      message TEXT NOT NULL,
+      category TEXT DEFAULT 'general',
+      email TEXT DEFAULT '',
+      machine_id TEXT DEFAULT '',
+      created_at TEXT DEFAULT (datetime('now'))
+    )
+  `);
+
+  ensureFeedbackColumn(database, "service", "TEXT NOT NULL DEFAULT 'deployment'");
+  ensureFeedbackColumn(database, "version", "TEXT DEFAULT ''");
+  ensureFeedbackColumn(database, "category", "TEXT DEFAULT 'general'");
+  ensureFeedbackColumn(database, "email", "TEXT DEFAULT ''");
+  ensureFeedbackColumn(database, "machine_id", "TEXT DEFAULT ''");
+  ensureFeedbackColumn(database, "created_at", "TEXT DEFAULT ''");
+}
+
+function ensureFeedbackColumn(
+  database: Database,
+  column: string,
+  definition: string
+): void {
+  const existing = getColumnInfo(database, "feedback", column);
+  if (existing) return;
+  database.exec(`ALTER TABLE feedback ADD COLUMN ${column} ${definition}`);
+}
+
 export function getDatabase(): Database {
   if (db) return db;
 
+  getStorageMode();
   const dbPath = getDbPath();
-  const adapter = new SqliteAdapter(dbPath);
-  const database = adapter.raw;
+  ensureParentDir(dbPath);
+  const database = new Database(dbPath);
 
   try {
+    configureDatabase(database);
     runMigrations(database);
-    ensureFeedbackTable(adapter);
+    ensureFeedbackTable(database);
   } catch (error) {
     database.close();
     throw error;
   }
 
-  _adapter = adapter;
-  db = _adapter.raw;
+  db = database;
   return db;
 }
 
@@ -250,12 +369,31 @@ export function closeDatabase(): void {
   if (db) {
     db.close();
     db = null;
-    _adapter = null;
   }
 }
 
 export function resetDatabase(): void {
   closeDatabase();
+}
+
+export function saveFeedback(input: SaveFeedbackInput): string {
+  const database = getDatabase();
+  const id = input.id ?? randomUUID();
+  const service = input.service ?? "deployment";
+  const version = input.version ?? "";
+  const email = input.email ?? "";
+  const category = input.category ?? "general";
+  const machineId = input.machine_id ?? hostname();
+  const createdAt = input.created_at ?? now();
+
+  database
+    .query(
+      `INSERT INTO feedback (id, service, version, message, email, category, machine_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(id, service, version, input.message, email, category, machineId, createdAt);
+
+  return id;
 }
 
 export function uuid(): string {
