@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { resolveCredentials, signRequest, type AwsCredentials } from "./aws-auth.js";
-import { writeFileSync, mkdirSync, rmSync, existsSync } from "fs";
+import { writeFileSync, mkdirSync, rmSync, chmodSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -33,7 +33,8 @@ describe("resolveCredentials", () => {
       "AWS_ROLE_SESSION_NAME",
       "AWS_SHARED_CREDENTIALS_FILE",
       "AWS_PROFILE",
-      "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI"
+      "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+      "PATH"
     );
   });
 
@@ -119,6 +120,39 @@ describe("resolveCredentials", () => {
     const stagingCreds = await resolveCredentials();
     expect(stagingCreds.accessKeyId).toBe("AKID_STAGING");
     expect(stagingCreds.sessionToken).toBe("TOKEN_STAGING");
+
+    rmSync(tmpDir, { recursive: true });
+  });
+
+  it("resolves role profiles through AWS CLI credential export", async () => {
+    const tmpDir = join(tmpdir(), `aws-cli-export-test-${Date.now()}`);
+    mkdirSync(tmpDir, { recursive: true });
+    const awsBin = join(tmpDir, "aws");
+    writeFileSync(
+      awsBin,
+      [
+        "#!/usr/bin/env sh",
+        "if [ \"$1 $2 $3 $4 $5 $6\" = \"configure export-credentials --profile hasna-xyz-infra --format process\" ]; then",
+        "  printf '%s' '{\"Version\":1,\"AccessKeyId\":\"AKID_CLI\",\"SecretAccessKey\":\"SECRET_CLI\",\"SessionToken\":\"TOKEN_CLI\",\"Expiration\":\"2030-01-01T00:00:00Z\"}'",
+        "  exit 0",
+        "fi",
+        "exit 1",
+        "",
+      ].join("\n")
+    );
+    chmodSync(awsBin, 0o755);
+    process.env["PATH"] = `${tmpDir}:${savedEnv["PATH"] ?? ""}`;
+    process.env["AWS_SHARED_CREDENTIALS_FILE"] = "/nonexistent/path/credentials";
+
+    const creds = await resolveCredentials({
+      aws_profile: "hasna-xyz-infra",
+      region: "us-east-1",
+    });
+
+    expect(creds.accessKeyId).toBe("AKID_CLI");
+    expect(creds.secretAccessKey).toBe("SECRET_CLI");
+    expect(creds.sessionToken).toBe("TOKEN_CLI");
+    expect(creds.region).toBe("us-east-1");
 
     rmSync(tmpDir, { recursive: true });
   });

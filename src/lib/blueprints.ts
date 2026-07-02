@@ -4,6 +4,7 @@ import { getBlueprint, listBlueprints as listDbBlueprints, createBlueprint } fro
 import { getEnvironment } from "../db/environments.js";
 import { getProvider as getDbProvider } from "../db/providers.js";
 import { getDeploymentSecrets } from "./secrets-integration.js";
+import { getProviderConnectionCredentials } from "./provider-credentials.js";
 import { getProject } from "../db/projects.js";
 import type {
   Blueprint,
@@ -28,7 +29,10 @@ export async function applyBlueprint(
   const project = getProject(environment.project_id);
 
   const secrets = getDeploymentSecrets(project.name, environment.name);
-  await provider.connect(secrets.credentials);
+  await provider.connect({
+    ...getProviderConnectionCredentials(dbProvider),
+    ...secrets.credentials,
+  });
 
   const resources: Resource[] = [];
   const errors: string[] = [];

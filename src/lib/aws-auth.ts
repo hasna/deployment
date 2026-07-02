@@ -6,8 +6,9 @@
  *   2. Environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN)
  *   3. AWS SSO / OIDC web identity token (AWS_WEB_IDENTITY_TOKEN_FILE + AWS_ROLE_ARN)
  *   4. Shared credentials file (~/.aws/credentials) with AWS_PROFILE or "default"
- *   5. ECS container credentials (AWS_CONTAINER_CREDENTIALS_RELATIVE_URI)
- *   6. EC2 instance metadata (IMDS v2)
+ *   5. AWS CLI profile export (supports role profiles in ~/.aws/config)
+ *   6. ECS container credentials (AWS_CONTAINER_CREDENTIALS_RELATIVE_URI)
+ *   7. EC2 instance metadata (IMDS v2)
  *
  * SigV4 signing is implemented from scratch — no AWS SDK dependency.
  */
@@ -15,6 +16,7 @@
 import { readFileSync, existsSync } from "fs";
 import { join } from "path";
 import { createHmac, createHash } from "crypto";
+import { spawnSync } from "child_process";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -49,11 +51,15 @@ export async function resolveCredentials(
     "us-east-1";
 
   // 1. Explicit credentials
-  if (explicit?.["access_key_id"] && explicit?.["secret_access_key"]) {
+  const explicitAccessKeyId =
+    explicit?.["access_key_id"] ?? explicit?.["AWS_ACCESS_KEY_ID"];
+  const explicitSecretAccessKey =
+    explicit?.["secret_access_key"] ?? explicit?.["AWS_SECRET_ACCESS_KEY"];
+  if (explicitAccessKeyId && explicitSecretAccessKey) {
     return {
-      accessKeyId: explicit["access_key_id"],
-      secretAccessKey: explicit["secret_access_key"],
-      sessionToken: explicit["session_token"],
+      accessKeyId: explicitAccessKeyId,
+      secretAccessKey: explicitSecretAccessKey,
+      sessionToken: explicit?.["session_token"] ?? explicit?.["AWS_SESSION_TOKEN"],
       region,
     };
   }
@@ -79,14 +85,21 @@ export async function resolveCredentials(
   }
 
   // 4. Shared credentials file
-  const sharedCreds = loadSharedCredentials(
-    process.env["AWS_PROFILE"] ?? "default"
-  );
+  const profile =
+    explicit?.["aws_profile"] ??
+    explicit?.["profile"] ??
+    process.env["AWS_PROFILE"] ??
+    "default";
+  const sharedCreds = loadSharedCredentials(profile);
   if (sharedCreds) {
     return { ...sharedCreds, region };
   }
 
-  // 5. ECS container credentials
+  // 5. AWS CLI profile export (supports role profiles in ~/.aws/config)
+  const cliCreds = exportCredentialsWithAwsCli(profile, region);
+  if (cliCreds) return cliCreds;
+
+  // 6. ECS container credentials
   if (process.env["AWS_CONTAINER_CREDENTIALS_RELATIVE_URI"]) {
     return await fetchContainerCredentials(
       process.env["AWS_CONTAINER_CREDENTIALS_RELATIVE_URI"],
@@ -94,7 +107,7 @@ export async function resolveCredentials(
     );
   }
 
-  // 6. EC2 IMDS v2
+  // 7. EC2 IMDS v2
   try {
     return await fetchImdsCredentials(region);
   } catch {
@@ -103,7 +116,8 @@ export async function resolveCredentials(
 
   throw new Error(
     "AWS: no credentials found. Set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, " +
-      "configure AWS_WEB_IDENTITY_TOKEN_FILE for OIDC, or ensure ~/.aws/credentials exists."
+      "configure AWS_WEB_IDENTITY_TOKEN_FILE for OIDC, ensure ~/.aws/credentials exists, " +
+      "or configure an AWS CLI profile."
   );
 }
 
@@ -176,6 +190,42 @@ function loadSharedCredentials(
     return { accessKeyId, secretAccessKey, sessionToken };
   }
   return null;
+}
+
+function exportCredentialsWithAwsCli(
+  profile: string,
+  region: string
+): AwsCredentials | null {
+  const result = spawnSync(
+    "aws",
+    ["configure", "export-credentials", "--profile", profile, "--format", "process"],
+    {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      env: { ...process.env, AWS_REGION: region, AWS_DEFAULT_REGION: region },
+    }
+  );
+
+  if (result.status !== 0 || !result.stdout.trim()) return null;
+
+  try {
+    const data = JSON.parse(result.stdout) as {
+      AccessKeyId?: string;
+      SecretAccessKey?: string;
+      SessionToken?: string;
+      Expiration?: string;
+    };
+    if (!data.AccessKeyId || !data.SecretAccessKey) return null;
+    return {
+      accessKeyId: data.AccessKeyId,
+      secretAccessKey: data.SecretAccessKey,
+      sessionToken: data.SessionToken,
+      region,
+      expiration: data.Expiration ? new Date(data.Expiration) : undefined,
+    };
+  } catch {
+    return null;
+  }
 }
 
 // ── ECS Container Credentials ──────────────────────────────────────────────

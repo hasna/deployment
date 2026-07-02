@@ -4,6 +4,7 @@ import { AwsProvider } from "./aws.js";
 
 describe("AwsProvider", () => {
   const savedEnv: Record<string, string | undefined> = {};
+  const savedFetch = globalThis.fetch;
 
   beforeEach(() => {
     process.env["OPEN_DEPLOYMENT_DB"] = ":memory:";
@@ -23,6 +24,7 @@ describe("AwsProvider", () => {
   });
 
   afterEach(() => {
+    globalThis.fetch = savedFetch;
     resetDatabase();
     closeDatabase();
     delete process.env["OPEN_DEPLOYMENT_DB"];
@@ -59,6 +61,41 @@ describe("AwsProvider", () => {
     await expect(
       provider.connect({ secret_access_key: "secret" })
     ).rejects.toThrow("no credentials found");
+  });
+
+  it("validates credentials with STS query protocol", async () => {
+    let capturedBody = "";
+    let capturedContentType = "";
+    globalThis.fetch = async (_url, init) => {
+      capturedBody = String(init?.body ?? "");
+      const headers = init?.headers as Record<string, string>;
+      capturedContentType = headers["content-type"] ?? "";
+      return new Response(
+        [
+          "<GetCallerIdentityResponse>",
+          "<GetCallerIdentityResult>",
+          "<Account>123456789012</Account>",
+          "<Arn>arn:aws:sts::123456789012:assumed-role/test/session</Arn>",
+          "<UserId>USERID</UserId>",
+          "</GetCallerIdentityResult>",
+          "</GetCallerIdentityResponse>",
+        ].join(""),
+        { status: 200 }
+      );
+    };
+
+    const provider = new AwsProvider();
+    await provider.connect({
+      access_key_id: "AKID",
+      secret_access_key: "SECRET",
+      session_token: "TOKEN",
+      region: "us-east-1",
+    });
+    const identity = await provider.getCallerIdentity();
+
+    expect(capturedBody).toContain("Action=GetCallerIdentity");
+    expect(capturedContentType).toBe("application/x-www-form-urlencoded");
+    expect(identity.account).toBe("123456789012");
   });
 
   it("exposes Secrets Manager operations", () => {

@@ -24,33 +24,14 @@ export class AwsProvider implements DeploymentProviderInterface {
     this.credentials = await resolveCredentials(credentials);
 
     // Validate by calling STS GetCallerIdentity
-    const res = await this.awsApi("sts", "GetCallerIdentity", {});
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`AWS: authentication failed (${res.status}): ${text}`);
-    }
+    await this.callStsGetCallerIdentity();
   }
 
   /**
    * Get the current caller identity (account, ARN, user ID).
    */
   async getCallerIdentity(): Promise<{ account: string; arn: string; userId: string }> {
-    const res = await this.awsApi("sts", "GetCallerIdentity", {});
-    const data = (await res.json()) as {
-      GetCallerIdentityResponse?: {
-        GetCallerIdentityResult?: {
-          Account: string;
-          Arn: string;
-          UserId: string;
-        };
-      };
-    };
-    const result = data.GetCallerIdentityResponse?.GetCallerIdentityResult;
-    return {
-      account: result?.Account ?? "",
-      arn: result?.Arn ?? "",
-      userId: result?.UserId ?? "",
-    };
+    return await this.callStsGetCallerIdentity();
   }
 
   async createProject(name: string, config?: Record<string, unknown>): Promise<string> {
@@ -460,6 +441,39 @@ export class AwsProvider implements DeploymentProviderInterface {
       body: signed.body,
     });
   }
+
+  private async callStsGetCallerIdentity(): Promise<{ account: string; arn: string; userId: string }> {
+    const creds = this.ensureConnected();
+    const endpoint = `https://sts.${creds.region}.amazonaws.com/`;
+    const body = new URLSearchParams({
+      Action: "GetCallerIdentity",
+      Version: "2011-06-15",
+    }).toString();
+    const signed = signRequest("POST", endpoint, "sts", body, creds, {
+      "content-type": "application/x-www-form-urlencoded",
+    });
+    const res = await fetch(signed.url, {
+      method: signed.method,
+      headers: signed.headers,
+      body: signed.body,
+    });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`AWS: authentication failed (${res.status}): ${text}`);
+    return parseCallerIdentityXml(text);
+  }
+}
+
+function parseCallerIdentityXml(xml: string): { account: string; arn: string; userId: string } {
+  return {
+    account: extractXml(xml, "Account"),
+    arn: extractXml(xml, "Arn"),
+    userId: extractXml(xml, "UserId"),
+  };
+}
+
+function extractXml(xml: string, tag: string): string {
+  const match = xml.match(new RegExp(`<${tag}>([^<]*)</${tag}>`));
+  return match?.[1] ?? "";
 }
 
 function getServiceTarget(service: string): string {
