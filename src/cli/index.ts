@@ -13,6 +13,7 @@ import { deploy, rollback, promote, getStatus, getLogs, previewDeploy } from "..
 import { applyBlueprint, seedBuiltinBlueprints } from "../lib/blueprints.js";
 import { setDeploymentSecret, listDeploymentSecrets, initSecrets } from "../lib/secrets-integration.js";
 import { registerProvider, getProvider as getRegisteredProvider } from "../lib/provider.js";
+import { getProviderConnectionCredentials } from "../lib/provider-credentials.js";
 import { detectProjectType } from "../lib/detect.js";
 import { timeAgo } from "../lib/format.js";
 import { addHook, listHooks, removeHook, runHooks, ensureHooksTable } from "../lib/hooks.js";
@@ -276,7 +277,7 @@ providerCmd
       const p = getDbProvider(id);
       const provider = getRegisteredProvider(p.type);
       console.log(chalk.yellow("⟳ Testing ") + chalk.bold(p.name) + ` (${p.type})...`);
-      await provider.connect({});
+      await provider.connect(getProviderConnectionCredentials(p));
       console.log(chalk.green("✓ Connected successfully: ") + p.name);
     } catch (e) {
       console.log(chalk.red("✗ Connection failed: ") + (e instanceof Error ? e.message : String(e)));

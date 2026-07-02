@@ -36,4 +36,34 @@ describe("deployer", () => {
     const { getLogs } = await import("./deployer.js");
     expect(typeof getLogs).toBe("function");
   });
+
+  it("returns local failure logs before querying provider logs", async () => {
+    const { createProject } = await import("../db/projects.js");
+    const { createProvider } = await import("../db/providers.js");
+    const { createEnvironment } = await import("../db/environments.js");
+    const { createDeployment, updateDeployment } = await import("../db/deployments.js");
+    const { getLogs } = await import("./deployer.js");
+
+    const project = createProject({ name: "proj", source_type: "git", source_url: "" });
+    const provider = createProvider({ name: "aws", type: "aws", credentials_key: "" });
+    const environment = createEnvironment({
+      project_id: project.id,
+      name: "production",
+      type: "prod",
+      provider_id: provider.id,
+    });
+    const deployment = createDeployment({
+      project_id: project.id,
+      environment_id: environment.id,
+      version: "failed",
+    });
+    updateDeployment(deployment.id, {
+      status: "failed",
+      logs: "AWS: image or task_definition required for deploy",
+    });
+
+    await expect(getLogs(project.id, environment.id)).resolves.toBe(
+      "AWS: image or task_definition required for deploy"
+    );
+  });
 });

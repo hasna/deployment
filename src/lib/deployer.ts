@@ -1,7 +1,8 @@
 import { getProvider } from "./provider.js";
 import { getDeploymentSecrets, injectSecretsToProvider, checkSecretParity } from "./secrets-integration.js";
+import { getProviderConnectionCredentials } from "./provider-credentials.js";
 import { triggerWorkflow, getLatestRun, type GitHubWorkflowRun } from "./github-actions.js";
-import { createDeployment, updateDeployment, getLatestDeployment } from "../db/deployments.js";
+import { createDeployment, updateDeployment, getLatestDeployment, getDeployment } from "../db/deployments.js";
 import { getEnvironment } from "../db/environments.js";
 import { getProject } from "../db/projects.js";
 import { getProvider as getDbProvider } from "../db/providers.js";
@@ -114,7 +115,10 @@ export async function deploy(input: DeployInput): Promise<Deployment> {
 
     // Connect to provider
     const secrets = getDeploymentSecrets(project.name, environment.name);
-    await provider.connect(secrets.credentials);
+    await provider.connect({
+      ...getProviderConnectionCredentials(dbProvider),
+      ...secrets.credentials,
+    });
 
     // Update status: building
     updateDeployment(deployment.id, {
@@ -208,7 +212,10 @@ export async function rollback(
   await runHooks("pre-rollback", hookCtx);
 
   const secrets = getDeploymentSecrets(project.name, environment.name);
-  await provider.connect(secrets.credentials);
+  await provider.connect({
+    ...getProviderConnectionCredentials(dbProvider),
+    ...secrets.credentials,
+  });
 
   // Mark current as rolled back
   updateDeployment(latest.id, { status: "rolled_back" });
@@ -296,7 +303,10 @@ export async function getStatus(
     const provider = getProvider(dbProvider.type);
     const project = getProject(projectId);
     const secrets = getDeploymentSecrets(project.name, environment.name);
-    await provider.connect(secrets.credentials);
+    await provider.connect({
+      ...getProviderConnectionCredentials(dbProvider),
+      ...secrets.credentials,
+    });
 
     const providerStatus = await provider.getDeploymentStatus(latest.id);
     return { deployment: latest, providerStatus };
@@ -312,15 +322,25 @@ export async function getLogs(
 ): Promise<string> {
   const environment = getEnvironment(environmentId);
   const dbProvider = getDbProvider(environment.provider_id);
-  const provider = getProvider(dbProvider.type);
   const project = getProject(projectId);
   const secrets = getDeploymentSecrets(project.name, environment.name);
-  await provider.connect(secrets.credentials);
 
   const id = deploymentId ?? getLatestDeployment(environmentId)?.id;
   if (!id) return "No deployments found";
+  const local = getDeployment(id);
+  if (local.status === "failed" && local.logs) return local.logs;
+  const provider = getProvider(dbProvider.type);
 
-  return provider.getDeploymentLogs(id);
+  try {
+    await provider.connect({
+      ...getProviderConnectionCredentials(dbProvider),
+      ...secrets.credentials,
+    });
+    return provider.getDeploymentLogs(id);
+  } catch (error) {
+    if (local.logs) return local.logs;
+    throw error;
+  }
 }
 
 // ── Sequential Multi-Environment Deploy ──────────────────────────────────
