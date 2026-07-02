@@ -162,6 +162,10 @@ describe("signRequest", () => {
     expect(signed.headers["Authorization"]).toMatch(/^AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/);
     expect(signed.headers["Authorization"]).toContain("SignedHeaders=");
     expect(signed.headers["Authorization"]).toContain("Signature=");
+    expect(signed.headers["host"]).toBe("sts.us-east-1.amazonaws.com");
+    expect(signed.headers["Authorization"]).toContain(
+      "SignedHeaders=content-type;host;x-amz-date;x-amz-target"
+    );
     expect(signed.headers["x-amz-date"]).toMatch(/^\d{8}T\d{6}Z$/);
   });
 

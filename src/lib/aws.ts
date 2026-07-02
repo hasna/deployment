@@ -456,10 +456,23 @@ export class AwsProvider implements DeploymentProviderInterface {
 
     return fetch(signed.url, {
       method: signed.method,
-      headers: signed.headers,
+      headers: prepareAwsFetchHeaders(signed.headers),
       body: signed.body,
     });
   }
+}
+
+export function prepareAwsFetchHeaders(
+  signedHeaders: Record<string, string>
+): Record<string, string> {
+  const fetchHeaders: Record<string, string> = {};
+
+  for (const [name, value] of Object.entries(signedHeaders)) {
+    if (name.toLowerCase() === "host") continue;
+    fetchHeaders[name] = value;
+  }
+
+  return fetchHeaders;
 }
 
 function getServiceTarget(service: string): string {
